@@ -1961,6 +1961,11 @@ export declare enum BindingAttachDebugInfo {
   Full = 2,
 }
 
+export interface BindingBuildCacheOptions {
+  dir?: string
+  key?: string
+}
+
 export interface BindingBuiltinPlugin {
   __name: BindingBuiltinPluginName
   options?: unknown
@@ -2316,6 +2321,7 @@ export interface BindingExperimentalOptions {
   nativeMagicString?: boolean
   chunkOptimization?: boolean | BindingChunkOptimizationOptions
   lazyBarrel?: boolean
+  buildCache?: boolean | BindingBuildCacheOptions
 }
 
 export interface BindingFilterToken {
