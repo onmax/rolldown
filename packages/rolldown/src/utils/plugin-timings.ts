@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 /**
  * Measure what plugin hooks cost, from inside the JavaScript callback.
  *
@@ -372,5 +374,19 @@ export function summarizePluginTimings(key: object): PluginTimingsMeasurement {
     }
   }
 
+  dumpPluginTimings(recorder.busyMs, rows);
   return { busyMs: recorder.busyMs, rows };
+}
+
+let dumpCount = 0;
+// LAB ONLY: `ROLLDOWN_PLUGIN_TIMINGS_DUMP=<dir>` writes every row of every build to a file, where
+// the warning above prints only the top ones.
+function dumpPluginTimings(busyMs: number, rows: PluginTimingRow[]): void {
+  const dir = process.env.ROLLDOWN_PLUGIN_TIMINGS_DUMP;
+  if (!dir || import.meta.browserBuild) return;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `timings-${process.pid}-${dumpCount++}.json`),
+    JSON.stringify({ busyMs, rows }),
+  );
 }
