@@ -1,3 +1,4 @@
+use crate::types::module_record_store::SharedModuleRecordStore;
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -170,6 +171,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> ModuleLoader<'a, Fs> {
     cache: &'a mut ScanStageCache,
     is_full_scan: bool,
     magic_string_tx: Option<std::sync::mpsc::Sender<SourceMapGenMsg>>,
+    module_records: Option<SharedModuleRecordStore>,
   ) -> BuildResult<Self> {
     if is_full_scan {
       // TODO: drop the cache in another thread
@@ -199,7 +201,8 @@ impl<'a, Fs: FileSystem + Clone + 'static> ModuleLoader<'a, Fs> {
     // the consumer may need the JS thread — pinned by `block_on` — to run
     // plugin hooks first. Keeping the channel unbounded removes that edge.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let shared_context = Arc::new(TaskContext { options, tx, resolver, fs, plugin_driver, meta });
+    let shared_context =
+      Arc::new(TaskContext { options, tx, resolver, fs, plugin_driver, meta, module_records });
 
     let importers = std::mem::take(&mut cache.importers);
     let intermediate_normal_modules = IntermediateNormalModules::new(is_full_scan, importers);

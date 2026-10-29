@@ -82,6 +82,11 @@ export class TransformPluginContextImpl extends PluginContextImpl {
         handler(log);
       };
 
+    const emitFile = this.emitFile;
+    this.emitFile = (file) => {
+      inner.noteEmittedFile();
+      return emitFile(file);
+    };
     this.debug = getLogHandler(this.debug);
     this.warn = getLogHandler(this.warn);
     this.info = getLogHandler(this.info);

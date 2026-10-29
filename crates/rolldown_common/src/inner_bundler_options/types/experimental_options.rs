@@ -7,6 +7,7 @@ use super::attach_debug_info::AttachDebugInfo;
 use super::chunk_import_map::ChunkImportMap;
 use super::chunk_modules_order::ChunkModulesOrderBy;
 use super::dev_mode_options::DevModeOptions;
+use super::incremental_build_cache_options::IncrementalBuildCacheOptions;
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(
@@ -72,6 +73,7 @@ pub struct ExperimentalOptions {
   pub vite_mode: Option<bool>,
   pub resolve_new_url_to_asset: Option<bool>,
   pub incremental_build: Option<bool>,
+  pub incremental_build_cache: Option<IncrementalBuildCacheOptions>,
   pub dev_mode: Option<DevModeOptions>,
   pub attach_debug_info: Option<AttachDebugInfo>,
   pub chunk_import_map: Option<ChunkImportMap>,

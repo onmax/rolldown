@@ -202,6 +202,7 @@ function bindingifyExperimental(
     chunkImportMap: experimental?.chunkImportMap,
     onDemandWrapping: experimental?.onDemandWrapping,
     incrementalBuild: experimental?.incrementalBuild,
+    incrementalBuildCache: experimental?.incrementalBuildCache,
     nativeMagicString: experimental?.nativeMagicString,
     chunkOptimization: experimental?.chunkOptimization,
     lazyBarrel: experimental?.lazyBarrel,

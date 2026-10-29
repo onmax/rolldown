@@ -15,6 +15,16 @@ pub struct PackageJson {
 }
 
 impl PackageJson {
+  pub fn new(
+    name: Option<ArcStr>,
+    version: Option<ArcStr>,
+    r#type: Option<&'static str>,
+    side_effects: Option<SideEffects>,
+    realpath: PathBuf,
+  ) -> Self {
+    Self { name, version, r#type, side_effects, realpath }
+  }
+
   pub fn from_oxc_pkg_json(oxc_pkg_json: &oxc_resolver::PackageJson) -> Self {
     Self {
       name: oxc_pkg_json.name().map(ArcStr::from),

@@ -11,6 +11,7 @@ pub struct BindingExperimentalOptions {
   pub chunk_import_map: Option<Either<bool, BindingChunkImportMap>>,
   pub on_demand_wrapping: Option<bool>,
   pub incremental_build: Option<bool>,
+  pub incremental_build_cache: Option<BindingIncrementalBuildCacheOptions>,
   pub native_magic_string: Option<bool>,
   pub chunk_optimization: Option<Either<bool, BindingChunkOptimizationOptions>>,
   pub lazy_barrel: Option<bool>,
@@ -24,6 +25,7 @@ impl TryFrom<BindingExperimentalOptions> for rolldown_common::ExperimentalOption
       vite_mode: value.vite_mode,
       resolve_new_url_to_asset: value.resolve_new_url_to_asset,
       incremental_build: value.incremental_build,
+      incremental_build_cache: value.incremental_build_cache.map(Into::into),
       dev_mode: value.dev_mode.map(Into::into),
       attach_debug_info: value.attach_debug_info.map(Into::into),
       chunk_modules_order: value.chunk_modules_order.map(Into::into),
@@ -39,6 +41,20 @@ impl TryFrom<BindingExperimentalOptions> for rolldown_common::ExperimentalOption
       }),
       lazy_barrel: value.lazy_barrel,
     })
+  }
+}
+
+#[napi_derive::napi(object, object_to_js = false)]
+#[derive(Debug, Default)]
+pub struct BindingIncrementalBuildCacheOptions {
+  pub dir: String,
+  pub key: Option<String>,
+  pub invalidate: Option<Vec<String>>,
+}
+
+impl From<BindingIncrementalBuildCacheOptions> for rolldown_common::IncrementalBuildCacheOptions {
+  fn from(value: BindingIncrementalBuildCacheOptions) -> Self {
+    Self { dir: value.dir, key: value.key, invalidate: value.invalidate }
   }
 }
 

@@ -21,6 +21,7 @@ use rolldown_plugin::{
   HookBuildEndArgs, HookCloseBundleArgs, HookRenderErrorArgs, SharedPluginDriver,
 };
 use rolldown_utils::dashmap::FxDashSet;
+use crate::types::module_record_store::SharedModuleRecordStore;
 use std::{path::Path, sync::Arc};
 use sugar_path::SugarPath;
 
@@ -37,6 +38,8 @@ pub struct Bundle<Fs: FileSystem + Clone + 'static = OsFileSystem> {
   pub(crate) warnings: Vec<BuildDiagnostic>,
   pub(crate) cache: ScanStageCache,
   pub(crate) bundle_span: tracing::Span,
+  /// Set by `experimental.incrementalBuildCache`.
+  pub(crate) module_records: Option<SharedModuleRecordStore>,
 }
 
 impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
@@ -115,6 +118,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
       self.fs.clone(),
       Arc::clone(&self.resolver),
     )
+    .with_module_records(self.module_records.clone())
     .scan(scan_mode, &mut self.cache)
     .await
     {
@@ -178,7 +182,8 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     scan_stage_output: NormalizedScanStageOutput,
   ) -> BuildResult<BundleOutput> {
     let result = self.bundle_write_impl(scan_stage_output).await;
-    self.invalidate_js_side_cache(result).await
+    let result = self.invalidate_js_side_cache(result).await;
+    self.save_module_records(result)
   }
 
   async fn bundle_write_impl(
@@ -258,7 +263,21 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     scan_stage_output: NormalizedScanStageOutput,
   ) -> BuildResult<BundleOutput> {
     let result = self.bundle_up(scan_stage_output, false).await;
-    self.invalidate_js_side_cache(result).await
+    let result = self.invalidate_js_side_cache(result).await;
+    self.save_module_records(result)
+  }
+
+  /// Only a successful build replaces the records on disk.
+  fn save_module_records(&self, result: BuildResult<BundleOutput>) -> BuildResult<BundleOutput> {
+    let output = result?;
+    if let Some(store) = &self.module_records {
+      let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
+      store.save().with_context(|| {
+        format!("Could not write the incremental build cache: {}", store.stats_line())
+      })?;
+      timer.lap(&format!("save-module-records ({})", store.stats_line()));
+    }
+    Ok(output)
   }
 
   /// A plugin may read `chunk.code` in `generateBundle` or `writeBundle` before a later hook fails, so the

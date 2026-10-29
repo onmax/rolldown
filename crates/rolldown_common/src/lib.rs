@@ -27,6 +27,7 @@ pub mod bundler_options {
     types::{
       attach_debug_info::AttachDebugInfo,
       chunk_import_map::ChunkImportMap,
+      incremental_build_cache_options::IncrementalBuildCacheOptions,
       chunk_modules_order::ChunkModulesOrderBy,
       code_splitting_mode::CodeSplittingMode,
       comments::CommentsOptions,

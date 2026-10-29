@@ -1,3 +1,4 @@
+use crate::types::module_record_store::SharedModuleRecordStore;
 use std::{sync::Arc, thread};
 
 use arcstr::ArcStr;
@@ -35,6 +36,7 @@ pub struct ScanStage<Fs: FileSystem + Clone + 'static> {
   plugin_driver: SharedPluginDriver,
   fs: Fs,
   resolver: SharedResolver<Fs>,
+  module_records: Option<SharedModuleRecordStore>,
 }
 
 #[derive(Debug)]
@@ -152,7 +154,12 @@ impl<Fs: FileSystem + Clone + 'static> ScanStage<Fs> {
     fs: Fs,
     resolver: SharedResolver<Fs>,
   ) -> Self {
-    Self { options, plugin_driver, fs, resolver }
+    Self { options, plugin_driver, fs, resolver, module_records: None }
+  }
+
+  pub fn with_module_records(mut self, module_records: Option<SharedModuleRecordStore>) -> Self {
+    self.module_records = module_records;
+    self
   }
 
   #[tracing::instrument(target = "devtool", level = "debug", skip_all)]
@@ -177,6 +184,7 @@ impl<Fs: FileSystem + Clone + 'static> ScanStage<Fs> {
       cache,
       fetch_mode.is_full(),
       tx_clone,
+      self.module_records.clone(),
     )?;
 
     // For `pluginContext.emitFile` with `type: chunk`, support it at buildStart hook.

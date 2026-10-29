@@ -187,6 +187,9 @@ impl BundleFactory {
       warnings: std::mem::take(&mut self.warnings),
       bundle_span,
       cache,
+      module_records: self.options.experimental.incremental_build_cache.as_ref().map(|options| {
+        Arc::new(crate::types::module_record_store::ModuleRecordStore::load(options))
+      }),
     };
     self.last_bundle_handle = Some(bundle.context());
     bundle

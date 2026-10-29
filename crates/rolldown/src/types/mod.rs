@@ -8,5 +8,6 @@ pub mod generator;
 pub mod linking_metadata;
 pub mod member_read_star_reexport_path;
 pub mod module_factory;
+pub mod module_record_store;
 pub mod oxc_parse_type;
 pub mod scan_stage_cache;

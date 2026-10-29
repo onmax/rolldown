@@ -23,6 +23,11 @@ use crate::{
 };
 
 use super::{resolve_utils::resolve_dependencies, task_context::TaskContext};
+use crate::types::module_record_store::{
+  ModuleRecord, ModuleRecordStore, RecordedResolvedId, RecordedSourcemap,
+  decode_hook_side_effects, encode_hook_side_effects,
+};
+use oxc_index::IndexVec;
 
 pub struct ModuleTaskOwner {
   source: ArcStr,
@@ -108,9 +113,27 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
 
     let mut sourcemap_chain = vec![];
     let mut hook_side_effects = self.resolved_id.side_effects.take();
-    let (source, module_type) = self
-      .load_source(&mut sourcemap_chain, &mut hook_side_effects, self.magic_string_tx.clone())
-      .await?;
+    // Native magic string fills the sourcemap chain after the scan, which a record would miss.
+    let module_records =
+      self.ctx.module_records.as_ref().filter(|_| self.magic_string_tx.is_none());
+    let reused = module_records.and_then(|store| store.reusable(id.as_str())).and_then(|record| {
+      let chain = record.sourcemap_chain.iter().map(RecordedSourcemap::decode).collect::<Option<Vec<_>>>()?;
+      Some((record, chain))
+    });
+    let (source, module_type) = if let Some((record, chain)) = &reused {
+      sourcemap_chain.clone_from(chain);
+      hook_side_effects = record.hook_side_effects.map(decode_hook_side_effects);
+      self.ctx.plugin_driver.watch_files.insert(self.resolved_id.id.as_arc_str().clone());
+      (StrOrBytes::Str(record.code.clone()), record.module_type())
+    } else {
+      self
+        .load_source(&mut sourcemap_chain, &mut hook_side_effects, self.magic_string_tx.clone())
+        .await?
+    };
+    let new_record = match (&reused, module_records, &source) {
+      (None, Some(store), StrOrBytes::Str(code)) => self.start_record(store, code, &module_type, hook_side_effects, &sourcemap_chain),
+      _ => None,
+    };
 
     let stable_id = id.stabilize(&self.ctx.options.cwd);
 
@@ -143,16 +166,36 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       )
       .await?;
 
-    let resolved_deps = resolve_dependencies(
-      &self.resolved_id,
-      &self.ctx.options,
-      &self.ctx.resolver,
-      &self.ctx.plugin_driver,
-      &raw_import_records,
-      ecma_view.source.clone(),
-      &mut warnings,
-    )
-    .await?;
+    let recorded_deps = reused.as_ref().and_then(|(record, _)| {
+      (record.resolved_deps.len() == raw_import_records.len()).then(|| {
+        record.resolved_deps.iter().map(RecordedResolvedId::decode).collect::<IndexVec<_, _>>()
+      })
+    });
+    let resolved_deps = if let Some(resolved_deps) = recorded_deps {
+      resolved_deps
+    } else {
+      resolve_dependencies(
+        &self.resolved_id,
+        &self.ctx.options,
+        &self.ctx.resolver,
+        &self.ctx.plugin_driver,
+        &raw_import_records,
+        ecma_view.source.clone(),
+        &mut warnings,
+      )
+      .await?
+    };
+    if let Some(store) = module_records {
+      let record = match (reused, new_record) {
+        (Some((record, _)), _) => Some(record.clone()),
+        (None, Some(record)) => Some(record),
+        (None, None) => None,
+      };
+      if let Some(mut record) = record {
+        record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
+        store.keep(record);
+      }
+    }
 
     for (record, info) in raw_import_records.iter().zip(&resolved_deps) {
       match record.kind {
@@ -241,6 +284,51 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     );
 
     Ok(())
+  }
+
+  /// A record of what the hooks produced for this module, or `None` when the module cannot be
+  /// reused in a later build: it has no file behind it.
+  fn start_record(
+    &self,
+    store: &ModuleRecordStore,
+    code: &str,
+    module_type: &ModuleType,
+    hook_side_effects: Option<rolldown_common::side_effects::HookSideEffects>,
+    sourcemap_chain: &[SourcemapChainElement],
+  ) -> Option<ModuleRecord> {
+    if self.ctx.plugin_driver.modules_with_transform_emitted_files.contains(&self.module_idx) {
+      return None;
+    }
+    let id = self.resolved_id.id.as_str();
+    let file = ModuleRecordStore::file_of(id)?;
+    let mut files = vec![(file.to_string(), store.hash_file(file)?)];
+    let mut extra: Vec<String> = self
+      .ctx
+      .plugin_driver
+      .transform_dependencies
+      .get(&self.module_idx)
+      .map(|deps| deps.iter().map(|dep| dep.as_path().to_string_lossy().into_owned()).collect())
+      .unwrap_or_default();
+    if let Some(tsconfig) =
+      self.ctx.options.transform_options.discover_tsconfig_file(std::path::Path::new(file))
+    {
+      extra.push(tsconfig.to_string_lossy().into_owned());
+    }
+    extra.sort_unstable();
+    extra.dedup();
+    for dep in extra {
+      let hash = store.hash_file(&dep).unwrap_or(0);
+      files.push((dep, hash));
+    }
+    Some(ModuleRecord {
+      id: id.to_string(),
+      files,
+      code: code.to_string(),
+      module_type: module_type.to_string(),
+      hook_side_effects: hook_side_effects.map(encode_hook_side_effects),
+      sourcemap_chain: sourcemap_chain.iter().map(RecordedSourcemap::encode).collect(),
+      resolved_deps: vec![],
+    })
   }
 
   #[tracing::instrument(level = "debug", skip_all)]

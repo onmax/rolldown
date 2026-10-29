@@ -670,6 +670,23 @@ export interface InputOptions {
      */
     incrementalBuild?: boolean;
     /**
+     * Keep the scan stage's module records on disk, so a build in a new process reuses the
+     * `load`, `transform` and `resolveId` results of modules whose files did not change. Like
+     * `incrementalBuild`, this assumes those hooks have no side effects.
+     *
+     * - `dir`: where the records are read from and written to.
+     * - `key`: records written under another key are not reused. Put everything the hooks read
+     *   that Rolldown cannot see in it, such as plugin options and dependency versions.
+     * - `invalidate`: absolute paths of files to treat as changed, for inputs the hooks read
+     *   without `this.addWatchFile`.
+     * @hidden not ready for public usage yet
+     */
+    incrementalBuildCache?: {
+      dir: string;
+      key?: string;
+      invalidate?: string[];
+    };
+    /**
      * Use native Rust implementation of MagicString for source map generation.
      *
      * [MagicString](https://github.com/rich-harris/magic-string) is a JavaScript library commonly used by bundlers

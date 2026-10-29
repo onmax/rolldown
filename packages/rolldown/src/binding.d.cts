@@ -1887,6 +1887,7 @@ export declare class BindingSourceMap {
 export declare class BindingTransformPluginContext {
   getCombinedSourcemap(): string
   inner(): BindingPluginContext
+  noteEmittedFile(): void
   addWatchFile(file: string): void
   sendMagicString(magicString: BindingMagicString): string | null
 }
@@ -2313,6 +2314,7 @@ export interface BindingExperimentalOptions {
   chunkImportMap?: boolean | BindingChunkImportMap
   onDemandWrapping?: boolean
   incrementalBuild?: boolean
+  incrementalBuildCache?: BindingIncrementalBuildCacheOptions
   nativeMagicString?: boolean
   chunkOptimization?: boolean | BindingChunkOptimizationOptions
   lazyBarrel?: boolean
@@ -2450,6 +2452,12 @@ export interface BindingHotUpdateArgs {
   file: string
   /** The affected module ids as currently computed (raw module ids). */
   modules: Array<string>
+}
+
+export interface BindingIncrementalBuildCacheOptions {
+  dir: string
+  key?: string
+  invalidate?: Array<string>
 }
 
 export interface BindingIndentOptions {

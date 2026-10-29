@@ -62,6 +62,16 @@ impl TransformPluginContext {
     })
   }
 
+  /// Records that this module's transform emitted a file, see
+  /// `PluginDriver::modules_with_transform_emitted_files`.
+  pub fn note_emitted_file(&self) {
+    if let crate::PluginContext::Native(ctx) = &self.inner {
+      if let Some(plugin_driver) = ctx.plugin_driver.upgrade() {
+        plugin_driver.note_transform_emitted_file(self.module_idx);
+      }
+    }
+  }
+
   /// Add a file or a directory as a watch dependency.
   pub fn add_watch_file(&self, file: &str) {
     // Skip all operations for virtual modules (starting with \0)

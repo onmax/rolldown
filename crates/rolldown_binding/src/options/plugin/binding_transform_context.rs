@@ -28,6 +28,11 @@ impl BindingTransformPluginContext {
   }
 
   #[napi]
+  pub fn note_emitted_file(&self) {
+    self.inner.note_emitted_file();
+  }
+
+  #[napi]
   pub fn add_watch_file(&self, file: String) {
     self.inner.add_watch_file(&file);
   }

@@ -42,6 +42,9 @@ pub struct PluginDriver {
   pub module_infos: SharedModuleInfoDashMap,
   /// Module dependencies tracked during load/transform hooks for HMR invalidation
   pub transform_dependencies: Arc<DashMap<ModuleIdx, Arc<FxDashSet<WatchPath>>>>,
+  /// Modules whose `transform` hooks called `this.emitFile`. Their results are not kept in
+  /// `experimental.incrementalBuildCache`, since reusing them would drop the emitted files.
+  pub modules_with_transform_emitted_files: FxDashSet<ModuleIdx>,
   context_load_completion_manager: ContextLoadCompletionManager,
   pub(crate) tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModuleLoaderMsg>>>>,
   /// Outlives the `Bundle` through `BundleHandle`, which is how the binding reads them
@@ -97,6 +100,10 @@ impl PluginDriver {
 
   pub fn plugins(&self) -> &IndexPluginable {
     &self.plugins
+  }
+
+  pub fn note_transform_emitted_file(&self, module_idx: ModuleIdx) {
+    self.modules_with_transform_emitted_files.insert(module_idx);
   }
 
   pub fn add_transform_dependency(&self, module_idx: ModuleIdx, dependency: WatchPath) {

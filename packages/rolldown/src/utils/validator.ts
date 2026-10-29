@@ -696,6 +696,13 @@ const InputOptionsSchema = v.strictObject({
       ),
       onDemandWrapping: v.optional(v.boolean()),
       incrementalBuild: v.optional(v.boolean()),
+      incrementalBuildCache: v.optional(
+        v.strictObject({
+          dir: v.string(),
+          key: v.optional(v.string()),
+          invalidate: v.optional(v.array(v.string())),
+        }),
+      ),
       nativeMagicString: v.optional(v.boolean()),
       chunkOptimization: v.optional(
         v.union([
