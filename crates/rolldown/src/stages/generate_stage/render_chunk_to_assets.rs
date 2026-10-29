@@ -55,6 +55,9 @@ impl GenerateStage<'_> {
     // fates finally diverge (errors -> `Err`, warnings -> `BundleOutput`).
     let mut diagnostics = std::mem::take(&mut self.link_output.diagnostics);
     let inline_renders = std::mem::take(&mut self.inline_renders);
+    let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| {
+      self.options.dir.clone().unwrap_or_default()
+    });
     // `ast_table` is threaded by value into `create_chunk_to_codegen_ret_map`
     // (the last reader), where it is dropped at scope exit by the compiler —
     // releasing the per-module bumpalo arenas before `minify_chunks` and
@@ -70,6 +73,7 @@ impl GenerateStage<'_> {
       )
       .await?;
 
+    timer.lap("generate:instantiate-chunks");
     self.trace_action_package_graph_ready(chunk_graph, &instantiated_chunks);
     self.trace_action_module_rendered(&instantiated_chunks);
 
@@ -84,9 +88,12 @@ impl GenerateStage<'_> {
       .await?,
     );
 
+    timer.lap("generate:renderChunk-hooks");
     augment_chunk_hash(self.plugin_driver, &mut instantiated_chunks).await?;
+    timer.lap("generate:augmentChunkHash-hook");
 
     let mangle_cache = Self::minify_chunks(self.options, &mut instantiated_chunks)?;
+    timer.lap("generate:minify");
 
     Self::post_banner_footer(&mut instantiated_chunks)?;
 
@@ -101,6 +108,7 @@ impl GenerateStage<'_> {
     )
     .await?;
 
+    timer.lap("generate:finalize-assets");
     // Set emitted chunk info for file emitter, it should be set before call generate_bundle hook
     set_emitted_chunk_filenames(&self.plugin_driver.file_emitter, &assets, chunk_graph);
 
