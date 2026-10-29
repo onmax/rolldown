@@ -30,6 +30,14 @@ impl BindingOutputAsset {
     })
   }
 
+  /// The address of the asset's data, like `BindingOutputChunk::get_code_identity`: two
+  /// `BindingOutputAsset`s with the same identity share the same data.
+  #[napi]
+  pub fn get_identity(&self) -> napi::Result<i64> {
+    let address = Arc::as_ptr(self.try_get_inner()?).addr();
+    Ok(i64::try_from(address).unwrap_or(i64::MAX))
+  }
+
   #[napi(enumerable = false)]
   pub fn drop_inner(&mut self) -> ExternalMemoryStatus {
     match self.inner.take() {

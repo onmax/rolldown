@@ -10,9 +10,8 @@ import { bindingifySourcemap } from '../types/sourcemap';
 import { aggregateBindingErrorsIntoJsError, unwrapBindingResult } from '../utils/error';
 import { transformRenderedChunk } from '../utils/transform-rendered-chunk';
 import {
-  type ChangedOutputs,
   collectChangedBundle,
-  transformToOutputBundle,
+  transformToSharedOutputBundle,
 } from '../utils/transform-to-rollup-output';
 import { bindingifyRenderChunkFilter } from './bindingify-hook-filter';
 import type { BindingifyPluginArgs } from './bindingify-plugin';
@@ -178,18 +177,15 @@ function createOutputBundle(
   ctx: BindingPluginContext,
   bundle: BindingResult<BindingOutputs>,
 ) {
-  const changed = {
-    updated: new Set(),
-    deleted: new Set(),
-  } as ChangedOutputs;
   const context = createPluginContext(args, ctx);
-  const output = transformToOutputBundle(
+  const cache = args.pluginContextData.outputBundleCache;
+  const output = transformToSharedOutputBundle(
     context,
     unwrapBindingResult(bundle),
-    changed,
+    cache,
     args.pluginContextData.outputCodeCache ?? undefined,
   );
-  return { changed, context, output };
+  return { changed: cache.changed, context, output };
 }
 
 export function bindingifyGenerateBundle(

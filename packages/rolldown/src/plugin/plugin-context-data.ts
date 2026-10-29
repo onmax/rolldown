@@ -12,6 +12,10 @@ import { NormalizedInputOptionsImpl } from '../options/normalized-input-options'
 import { NormalizedOutputOptionsImpl } from '../options/normalized-output-options';
 import type { ModuleInfo } from '../types/module-info';
 import { transformModuleInfo } from '../utils/transform-module-info';
+import {
+  createOutputBundleCache,
+  type OutputBundleCache,
+} from '../utils/transform-to-rollup-output';
 import type { RenderedChunkMeta } from '.';
 import type { PluginContextResolveOptions } from './plugin-context';
 
@@ -49,6 +53,8 @@ export class PluginContextData {
    * `PluginContextData`, so the cache never finds a match. See `parallel-plugin-worker.ts`.
    */
   outputCodeCache: Map<string, OutputCodeCacheEntry> | null;
+  /** One bundle object shared by the output hooks of a build; see `OutputBundleCache`. */
+  outputBundleCache: OutputBundleCache = createOutputBundleCache();
   resolveOptionsMap: Map<number, PluginContextResolveOptions> = new Map();
   loadModulePromiseMap: Map<string, Promise<void>> = new Map();
   renderedChunkMeta: RenderedChunkMeta | null = null;
@@ -174,5 +180,6 @@ export class PluginContextData {
     this.loadModulePromiseMap.clear();
     // Watch mode reuses this object across rebuilds; entries hold the previous build's chunk data.
     this.outputCodeCache?.clear();
+    this.outputBundleCache = createOutputBundleCache();
   }
 }

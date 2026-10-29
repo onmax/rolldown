@@ -1793,6 +1793,11 @@ export declare class BindingNormalizedOptions {
 }
 
 export declare class BindingOutputAsset {
+  /**
+   * The address of the asset's data, like `BindingOutputChunk::get_code_identity`: two
+   * `BindingOutputAsset`s with the same identity share the same data.
+   */
+  getIdentity(): number
   dropInner(): ExternalMemoryStatus
   getFileName(): string
   getOriginalFileName(): string | null

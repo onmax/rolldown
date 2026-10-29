@@ -62,7 +62,12 @@ function transformToMutableRollupOutputChunk(
       return code;
     },
     fileName,
-    name: bindingChunk.getName(),
+    // Fields are read lazily: a `generateBundle` or `writeBundle` call builds this wrapper for
+    // every output, and most plugins read only a few fields of a few outputs. The Proxy below
+    // caches each value on first read.
+    get name() {
+      return bindingChunk.getName();
+    },
     get modules() {
       return transformChunkModules(bindingChunk.getModules());
     },
@@ -72,10 +77,18 @@ function transformToMutableRollupOutputChunk(
     get dynamicImports() {
       return bindingChunk.getDynamicImports();
     },
-    exports: bindingChunk.getExports(),
-    isEntry: bindingChunk.getIsEntry(),
-    facadeModuleId: bindingChunk.getFacadeModuleId() || null,
-    isDynamicEntry: bindingChunk.getIsDynamicEntry(),
+    get exports() {
+      return bindingChunk.getExports();
+    },
+    get isEntry() {
+      return bindingChunk.getIsEntry();
+    },
+    get facadeModuleId() {
+      return bindingChunk.getFacadeModuleId() || null;
+    },
+    get isDynamicEntry() {
+      return bindingChunk.getIsDynamicEntry();
+    },
     get moduleIds() {
       return bindingChunk.getModuleIds();
     },
@@ -83,8 +96,12 @@ function transformToMutableRollupOutputChunk(
       const map = bindingChunk.getMap();
       return map ? transformToRollupSourceMap(map) : null;
     },
-    sourcemapFileName: bindingChunk.getSourcemapFileName() || null,
-    preliminaryFileName: bindingChunk.getPreliminaryFileName(),
+    get sourcemapFileName() {
+      return bindingChunk.getSourcemapFileName() || null;
+    },
+    get preliminaryFileName() {
+      return bindingChunk.getPreliminaryFileName();
+    },
   } as OutputChunk;
   const cache: Record<string | symbol, any> = {};
   return new Proxy(chunk, {
@@ -98,7 +115,7 @@ function transformToMutableRollupOutputChunk(
     },
     set(_target, p, newValue): boolean {
       cache[p] = newValue;
-      changed.updated.add(bindingChunk.getFileName());
+      changed.updated.add(fileName);
       return true;
     },
     has(target, p): boolean {
@@ -116,16 +133,25 @@ function transformToMutableRollupOutputAsset(
   bindingAsset: BindingOutputAsset,
   changed: ChangedOutputs,
 ): OutputAsset {
+  const fileName = bindingAsset.getFileName();
   const asset = {
     type: 'asset',
-    fileName: bindingAsset.getFileName(),
-    originalFileName: bindingAsset.getOriginalFileName() || null,
-    originalFileNames: bindingAsset.getOriginalFileNames(),
+    fileName,
+    get originalFileName() {
+      return bindingAsset.getOriginalFileName() || null;
+    },
+    get originalFileNames() {
+      return bindingAsset.getOriginalFileNames();
+    },
     get source(): AssetSource {
       return transformAssetSource(bindingAsset.getSource());
     },
-    name: bindingAsset.getName() ?? undefined,
-    names: bindingAsset.getNames(),
+    get name() {
+      return bindingAsset.getName() ?? undefined;
+    },
+    get names() {
+      return bindingAsset.getNames();
+    },
   } as OutputAsset;
   const cache: Record<string | symbol, any> = {};
   return new Proxy(asset, {
@@ -139,7 +165,7 @@ function transformToMutableRollupOutputAsset(
     },
     set(_target, p, newValue): boolean {
       cache[p] = newValue;
-      changed.updated.add(bindingAsset.getFileName());
+      changed.updated.add(fileName);
       return true;
     },
   });
@@ -159,33 +185,11 @@ export function transformToRollupOutput(output: BindingOutputs): RolldownOutput 
   return transformed;
 }
 
-function transformToMutableRollupOutput(
-  output: BindingOutputs,
+function bundleHandler(
+  getContext: () => MinimalPluginContext,
   changed: ChangedOutputs,
-  codeCache?: Map<string, OutputCodeCacheEntry>,
-): RolldownOutput {
-  const { chunks, assets } = output;
+): ProxyHandler<OutputBundle> {
   return {
-    output: [
-      ...chunks.map((chunk) => transformToMutableRollupOutputChunk(chunk, changed, codeCache)),
-      ...assets.map((asset) => transformToMutableRollupOutputAsset(asset, changed)),
-    ],
-  } as RolldownOutput;
-}
-
-export function transformToOutputBundle(
-  context: MinimalPluginContext,
-  output: BindingOutputs,
-  changed: ChangedOutputs,
-  codeCache?: Map<string, OutputCodeCacheEntry>,
-): OutputBundle {
-  const bundle = Object.fromEntries(
-    transformToMutableRollupOutput(output, changed, codeCache).output.map((item) => [
-      item.fileName,
-      item,
-    ]),
-  );
-  return new Proxy(bundle, {
     set(_target, _p, _newValue, _receiver) {
       const originalStackTraceLimit = Error.stackTraceLimit;
       Error.stackTraceLimit = 2;
@@ -194,7 +198,7 @@ export function transformToOutputBundle(
       const stack = new Error(message).stack ?? message;
       Error.stackTraceLimit = originalStackTraceLimit;
 
-      context.warn({
+      getContext().warn({
         message: stack,
         code: 'UNSUPPORTED_BUNDLE_ASSIGNMENT',
       });
@@ -207,7 +211,7 @@ export function transformToOutputBundle(
       delete target[property as keyof typeof target];
       return true;
     },
-  });
+  };
 }
 
 export interface ChangedOutputs {
@@ -216,6 +220,68 @@ export interface ChangedOutputs {
 }
 
 // TODO find a way only transfer the changed part to Rust side.
+/**
+ * State kept across the `generateBundle` and `writeBundle` calls of one build, so consecutive
+ * plugins share one bundle object, as in Rollup. Each output's wrapper is kept by the identity of
+ * its native data: Rust replaces an output's data whenever it changes, so an unchanged identity
+ * means an unchanged output.
+ */
+export interface OutputBundleCache {
+  /** Cleared at the start of every call; wrappers record their mutations here. */
+  changed: ChangedOutputs;
+  context: MinimalPluginContext | null;
+  items: Map<number, OutputChunk | OutputAsset>;
+  bundle: OutputBundle | null;
+}
+
+export function createOutputBundleCache(): OutputBundleCache {
+  return {
+    changed: { updated: new Set(), deleted: new Set() },
+    context: null,
+    items: new Map(),
+    bundle: null,
+  };
+}
+
+export function transformToSharedOutputBundle(
+  context: MinimalPluginContext,
+  output: BindingOutputs,
+  cache: OutputBundleCache,
+  codeCache?: Map<string, OutputCodeCacheEntry>,
+): OutputBundle {
+  cache.changed.updated.clear();
+  cache.changed.deleted.clear();
+  cache.context = context;
+  const items = new Map<number, OutputChunk | OutputAsset>();
+  let reusedAll = cache.bundle !== null;
+  for (const chunk of output.chunks) {
+    const identity = chunk.getCodeIdentity();
+    let item = cache.items.get(identity);
+    if (!item) {
+      item = transformToMutableRollupOutputChunk(chunk, cache.changed, codeCache);
+      reusedAll = false;
+    }
+    items.set(identity, item);
+  }
+  for (const asset of output.assets) {
+    const identity = asset.getIdentity();
+    let item = cache.items.get(identity);
+    if (!item) {
+      item = transformToMutableRollupOutputAsset(asset, cache.changed);
+      reusedAll = false;
+    }
+    items.set(identity, item);
+  }
+  if (reusedAll && items.size === cache.items.size) return cache.bundle!;
+  cache.items = items;
+  const bundle = Object.fromEntries([...items.values()].map((item) => [item.fileName, item]));
+  cache.bundle = new Proxy(
+    bundle,
+    bundleHandler(() => cache.context!, cache.changed),
+  );
+  return cache.bundle;
+}
+
 export function collectChangedBundle(
   changed: ChangedOutputs,
   bundle: OutputBundle,
