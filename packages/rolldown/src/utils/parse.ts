@@ -6,6 +6,7 @@ import {
 } from '../binding.cjs';
 // @ts-ignore
 import * as oxcParserWrap from 'oxc-parser/src-js/wrap.js';
+import { parseSyncRaw } from './raw-transfer';
 
 /**
  * Result of parsing a code
@@ -60,5 +61,8 @@ export function parseSync(
   sourceText: string,
   options?: ParserOptions | null,
 ): ParseResult {
-  return oxcParserWrap.wrap(originalParseSync(filename, sourceText, options));
+  return (
+    parseSyncRaw(filename, sourceText, options) ??
+    oxcParserWrap.wrap(originalParseSync(filename, sourceText, options))
+  );
 }
