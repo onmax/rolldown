@@ -17,7 +17,7 @@ use std::{
   path::{Path, PathBuf},
   sync::{
     Arc,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
   },
 };
 
@@ -27,12 +27,25 @@ use rolldown_common::{
   ResolvedExternal, ResolvedId, SourcemapChainElement, side_effects::HookSideEffects,
 };
 use rolldown_sourcemap::SourceMap;
-use rolldown_utils::dashmap::FxDashMap;
+use rolldown_utils::{
+  dashmap::FxDashMap,
+  rayon::{IntoParallelIterator, ParallelIterator},
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-const RECORDS_FILE: &str = "module-records.json";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+/// Records are split by id into shards, so a build that changed a few modules rewrites a few
+/// shards instead of every record.
+const SHARDS: usize = 32;
+
+fn shard_of(id: &str) -> usize {
+  (xxhash_rust::xxh3::xxh3_64(id.as_bytes()) % SHARDS as u64) as usize
+}
+
+fn shard_file(dir: &Path, shard: usize) -> PathBuf {
+  dir.join(format!("module-records-{shard:02}.json"))
+}
 
 #[derive(Serialize, Deserialize)]
 struct RecordFile {
@@ -40,6 +53,14 @@ struct RecordFile {
   rolldown_version: String,
   key: Option<String>,
   records: Vec<ModuleRecord>,
+}
+
+#[derive(Serialize)]
+struct RecordFileRef<'a> {
+  version: u32,
+  rolldown_version: &'a str,
+  key: Option<&'a str>,
+  records: Vec<&'a ModuleRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +126,9 @@ pub struct ModuleRecordStore {
   dir: PathBuf,
   key: Option<String>,
   previous: FxHashMap<ArcStr, ModuleRecord>,
+  previous_per_shard: [usize; SHARDS],
+  /// Shards that got a record this build did not reuse unchanged.
+  dirty: [AtomicBool; SHARDS],
   invalidate: FxHashSet<String>,
   // LAB ONLY: `ROLLDOWN_INCREMENTAL_CACHE_EXCLUDE`, comma-separated id substrings never reused.
   // Stands in for a plugin-declared opt-out until `shouldTransformCachedModule` exists.
@@ -121,20 +145,33 @@ impl ModuleRecordStore {
   /// version are dropped.
   pub fn load(options: &IncrementalBuildCacheOptions) -> Self {
     let dir = PathBuf::from(&options.dir);
-    let previous = std::fs::read(dir.join(RECORDS_FILE))
-      .ok()
-      .and_then(|bytes| serde_json::from_slice::<RecordFile>(&bytes).ok())
-      .filter(|file| {
-        file.version == FORMAT_VERSION
-          && file.rolldown_version == env!("CARGO_PKG_VERSION")
-          && file.key == options.key
+    let shards: Vec<Vec<ModuleRecord>> = (0..SHARDS)
+      .into_par_iter()
+      .map(|shard| {
+        std::fs::read(shard_file(&dir, shard))
+          .ok()
+          .and_then(|bytes| serde_json::from_slice::<RecordFile>(&bytes).ok())
+          .filter(|file| {
+            file.version == FORMAT_VERSION
+              && file.rolldown_version == env!("CARGO_PKG_VERSION")
+              && file.key == options.key
+          })
+          .map(|file| file.records)
+          .unwrap_or_default()
       })
-      .map(|file| file.records.into_iter().map(|r| (ArcStr::from(r.id.as_str()), r)).collect())
-      .unwrap_or_default();
+      .collect();
+    let mut previous_per_shard = [0; SHARDS];
+    for (shard, records) in shards.iter().enumerate() {
+      previous_per_shard[shard] = records.len();
+    }
+    let previous =
+      shards.into_iter().flatten().map(|r| (ArcStr::from(r.id.as_str()), r)).collect();
     Self {
       dir,
       key: options.key.clone(),
       previous,
+      previous_per_shard,
+      dirty: std::array::from_fn(|_| AtomicBool::new(false)),
       invalidate: options.invalidate.iter().flatten().cloned().collect(),
       exclude: std::env::var("ROLLDOWN_INCREMENTAL_CACHE_EXCLUDE")
         .map(|v| v.split(',').filter(|s| !s.is_empty()).map(ToString::to_string).collect())
@@ -182,26 +219,46 @@ impl ModuleRecordStore {
     Some(record)
   }
 
-  pub fn keep(&self, record: ModuleRecord) {
+  /// Keeps `record` for the next build. `unchanged` says it is a previous record reused as is.
+  pub fn keep(&self, record: ModuleRecord, unchanged: bool) {
     self.stats.recorded.fetch_add(1, Ordering::Relaxed);
+    if !unchanged {
+      self.dirty[shard_of(&record.id)].store(true, Ordering::Relaxed);
+    }
     self.next.insert(ArcStr::from(record.id.as_str()), Arc::new(record));
   }
 
-  /// Writes the records of this build, replacing the previous ones.
-  pub fn save(&self) -> std::io::Result<()> {
-    let mut records: Vec<ModuleRecord> =
-      self.next.iter().map(|entry| entry.value().as_ref().clone()).collect();
-    records.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-    let file = RecordFile {
-      version: FORMAT_VERSION,
-      rolldown_version: env!("CARGO_PKG_VERSION").to_string(),
-      key: self.key.clone(),
-      records,
-    };
+  /// Writes the records of this build, replacing the previous ones. A shard whose records are
+  /// the previous ones, unchanged, is not written again.
+  pub fn save(&self) -> std::io::Result<usize> {
+    let mut shards: Vec<Vec<Arc<ModuleRecord>>> = vec![Vec::new(); SHARDS];
+    for entry in &self.next {
+      shards[shard_of(entry.key())].push(Arc::clone(entry.value()));
+    }
     std::fs::create_dir_all(&self.dir)?;
-    let tmp = self.dir.join(format!("{RECORDS_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
-    std::fs::rename(tmp, self.dir.join(RECORDS_FILE))
+    let written = shards
+      .into_iter()
+      .enumerate()
+      .collect::<Vec<_>>()
+      .into_par_iter()
+      .filter(|(shard, records)| {
+        self.dirty[*shard].load(Ordering::Relaxed) || records.len() != self.previous_per_shard[*shard]
+      })
+      .map(|(shard, mut records)| {
+        records.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        let file = RecordFileRef {
+          version: FORMAT_VERSION,
+          rolldown_version: env!("CARGO_PKG_VERSION"),
+          key: self.key.as_deref(),
+          records: records.iter().map(AsRef::as_ref).collect(),
+        };
+        let path = shard_file(&self.dir, shard);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&file)?)?;
+        std::fs::rename(tmp, path)
+      })
+      .collect::<std::io::Result<Vec<()>>>()?;
+    Ok(written.len())
   }
 
   pub fn stats_line(&self) -> String {

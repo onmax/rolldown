@@ -171,6 +171,7 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
         record.resolved_deps.iter().map(RecordedResolvedId::decode).collect::<IndexVec<_, _>>()
       })
     });
+    let reused_deps = recorded_deps.is_some();
     let resolved_deps = if let Some(resolved_deps) = recorded_deps {
       resolved_deps
     } else {
@@ -186,14 +187,20 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       .await?
     };
     if let Some(store) = module_records {
-      let record = match (reused, new_record) {
-        (Some((record, _)), _) => Some(record.clone()),
-        (None, Some(record)) => Some(record),
-        (None, None) => None,
-      };
-      if let Some(mut record) = record {
-        record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
-        store.keep(record);
+      match (reused, new_record) {
+        (Some((record, _)), _) if reused_deps => store.keep(record.clone(), true),
+        (Some((record, _)), _) => store.keep(
+          ModuleRecord {
+            resolved_deps: resolved_deps.iter().map(RecordedResolvedId::encode).collect(),
+            ..record.clone()
+          },
+          false,
+        ),
+        (None, Some(mut record)) => {
+          record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
+          store.keep(record, false);
+        }
+        (None, None) => {}
       }
     }
 
@@ -326,7 +333,12 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       code: code.to_string(),
       module_type: module_type.to_string(),
       hook_side_effects: hook_side_effects.map(encode_hook_side_effects),
-      sourcemap_chain: sourcemap_chain.iter().map(RecordedSourcemap::encode).collect(),
+      // Without sourcemaps in the output, the chain is never read.
+      sourcemap_chain: if self.ctx.options.sourcemap.is_some() {
+        sourcemap_chain.iter().map(RecordedSourcemap::encode).collect()
+      } else {
+        vec![]
+      },
       resolved_deps: vec![],
     })
   }

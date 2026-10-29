@@ -19,6 +19,16 @@ beforeEach(() => {
   fs.writeFileSync(path.join(root, 'data.txt'), 'one');
 });
 
+/** The record shards on disk, by file name. */
+function records() {
+  return Object.fromEntries(
+    fs
+      .readdirSync(cacheDir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => [f, fs.readFileSync(path.join(cacheDir, f), 'utf8')]),
+  );
+}
+
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -77,7 +87,7 @@ async function build(options: { key?: string; invalidate?: string[]; cache?: boo
 test('a new build reuses the records of unchanged modules', async () => {
   const first = await build();
   expect(first.transformed).toEqual(['dep.js', 'emits.js', 'main.js']);
-  expect(fs.existsSync(path.join(cacheDir, 'module-records.json'))).toBe(true);
+  expect(Object.keys(records()).length).toBeGreaterThan(0);
 
   const second = await build();
   // `emits.js` emitted a file from `transform`, so it is never reused.
@@ -112,6 +122,19 @@ test('records written under another key are not reused', async () => {
   expect((await build({ key: 'b' })).transformed).toEqual(['dep.js', 'emits.js', 'main.js']);
 });
 
+test('a build that reuses every record leaves the record files untouched', async () => {
+  await build();
+  const before = Object.fromEntries(
+    Object.keys(records()).map((f) => [f, fs.statSync(path.join(cacheDir, f)).mtimeMs]),
+  );
+  // `emits.js` is never recorded, so every kept record is a reused one.
+  await build();
+  const after = Object.fromEntries(
+    Object.keys(records()).map((f) => [f, fs.statSync(path.join(cacheDir, f)).mtimeMs]),
+  );
+  expect(after).toEqual(before);
+});
+
 test('files listed in `invalidate` run their hooks again', async () => {
   await build();
   const rebuilt = await build({ invalidate: [path.join(root, 'dep.js')] });
@@ -120,8 +143,8 @@ test('files listed in `invalidate` run their hooks again', async () => {
 
 test('a failed build keeps the previous records', async () => {
   await build();
-  const records = fs.readFileSync(path.join(cacheDir, 'module-records.json'), 'utf8');
+  const before = records();
   fs.writeFileSync(path.join(root, 'main.js'), `import { missing } from './missing.js';\n`);
   await expect(build()).rejects.toThrow();
-  expect(fs.readFileSync(path.join(cacheDir, 'module-records.json'), 'utf8')).toBe(records);
+  expect(records()).toEqual(before);
 });
