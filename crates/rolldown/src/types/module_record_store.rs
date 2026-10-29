@@ -214,6 +214,24 @@ impl ModuleRecordStore {
 
   /// The record of `id` when all the files it depends on are unchanged.
   pub fn reusable(&self, id: &str) -> Option<&ModuleRecord> {
+    let found = self.reusable_inner(id);
+    // LAB ONLY: `ROLLDOWN_RECORDS_DEBUG=<file>` appends every id that is not reused.
+    if found.is_none() {
+      if let Some(path) = std::env::var_os("ROLLDOWN_RECORDS_DEBUG") {
+        use std::io::Write;
+        let reason = match self.previous.get(id) {
+          None => "missing",
+          Some(_) => "changed-or-invalidated",
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+          let _ = writeln!(f, "{}\t{reason}\t{id}", self.dir.display());
+        }
+      }
+    }
+    found
+  }
+
+  fn reusable_inner(&self, id: &str) -> Option<&ModuleRecord> {
     if self.exclude.iter().any(|s| id.contains(s.as_str())) {
       self.stats.excluded.fetch_add(1, Ordering::Relaxed);
       return None;
