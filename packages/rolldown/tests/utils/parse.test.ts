@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { parse, parseSync, Visitor } from 'rolldown/utils';
 import { expect, test } from 'vitest';
 
@@ -76,4 +78,13 @@ test('parseSync matches the JSON transfer of oxc-parser', async () => {
       expect(raw[field], `${field} of ${code}`).toEqual(json[field]);
     }
   }
+});
+
+test('oxc-parser is pinned to the oxc_parser_napi crate version', () => {
+  // Raw transfer reads the Rust AST layout with oxc-parser's generated deserializers,
+  // which are only valid for the exact same Oxc version.
+  const cargo = readFileSync(new URL('../../../../Cargo.toml', import.meta.url), 'utf8');
+  const crate = /^oxc_parser_napi = \{ version = "([^"]+)" \}/m.exec(cargo)?.[1];
+  const { version } = createRequire(import.meta.url)('oxc-parser/package.json');
+  expect(version).toBe(crate);
 });
