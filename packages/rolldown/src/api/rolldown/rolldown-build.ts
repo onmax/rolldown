@@ -159,7 +159,9 @@ export class RolldownBuild {
       } else {
         output = await this.#bundler.generate(option.bundlerOptions);
       }
-      return new RolldownOutputImpl(unwrapBindingResult(output));
+      const result = new RolldownOutputImpl(unwrapBindingResult(output));
+      option.onBuildSuccess?.();
+      return result;
     } catch (e) {
       await option.stopWorkers?.();
       throw e;

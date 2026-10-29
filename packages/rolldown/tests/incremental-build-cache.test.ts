@@ -148,3 +148,32 @@ test('a failed build keeps the previous records', async () => {
   await expect(build()).rejects.toThrow();
   expect(records()).toEqual(before);
 });
+test('`meta` returned by `transform` is still there for reused modules', async () => {
+  const run = async () => {
+    const seen: unknown[] = [];
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'meta',
+          transform(_code, id) {
+            if (id.endsWith('main.js')) return { meta: { meta: { tag: 'from transform' } } };
+          },
+          renderChunk(_code, chunk) {
+            for (const id of chunk.moduleIds) {
+              if (id.endsWith('main.js')) seen.push(this.getModuleInfo(id)?.meta.meta);
+            }
+            return null;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return seen;
+  };
+  expect(await run()).toEqual([{ tag: 'from transform' }]);
+  expect(await run()).toEqual([{ tag: 'from transform' }]);
+});

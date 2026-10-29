@@ -5,6 +5,7 @@ import { LOG_LEVEL_INFO } from '../log/logging';
 import type { InputOptions } from '../options/input-options';
 import type { OutputOptions } from '../options/output-options';
 import { PluginContextData } from '../plugin/plugin-context-data';
+import { loadModuleMeta, saveModuleMeta } from './incremental-build-cache-meta';
 import { PluginDriver } from '../plugin/plugin-driver';
 import { getObjectPlugins } from '../plugin/plugin-driver';
 import { bindingifyInputOptions } from './bindingify-input-options';
@@ -115,6 +116,10 @@ export async function createBundlerOptions(
       normalizedInputPlugins,
       normalizedOutputPlugins,
     );
+    const incrementalBuildCache = inputOptions.experimental?.incrementalBuildCache;
+    if (incrementalBuildCache && !import.meta.browserBuild) {
+      loadModuleMeta(incrementalBuildCache, pluginContextData);
+    }
 
     // Convert `InputOptions` to `BindingInputOptions`
     const bindingInputOptions = bindingifyInputOptions(
@@ -146,6 +151,10 @@ export async function createBundlerOptions(
       inputOptions,
       onLog,
       stopWorkers: parallelPluginInitResult?.stopWorkers,
+      onBuildSuccess:
+        incrementalBuildCache && !import.meta.browserBuild
+          ? () => saveModuleMeta(incrementalBuildCache, pluginContextData)
+          : undefined,
     };
   } catch (e) {
     await parallelPluginInitResult?.stopWorkers();
@@ -158,4 +167,6 @@ export interface BundlerOptionWithStopWorker {
   inputOptions: InputOptions;
   onLog: LogHandler;
   stopWorkers?: () => Promise<void>;
+  /** Persists JS-side state for `experimental.incrementalBuildCache`. */
+  onBuildSuccess?: () => void;
 }
