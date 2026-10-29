@@ -126,6 +126,10 @@ pub struct ModuleRecordStore {
   dir: PathBuf,
   key: Option<String>,
   previous: FxHashMap<ArcStr, ModuleRecord>,
+  /// For each file behind a module id, the files any of its ids depended on. Ids of one file
+  /// that differ by query (`X.vue?vue&type=script`) are made from state a plugin built while
+  /// processing another of them, so a dependency of one counts for all.
+  deps_by_file: FxHashMap<String, Vec<(String, u64)>>,
   previous_per_shard: [usize; SHARDS],
   /// Shards that got a record this build did not reuse unchanged.
   dirty: [AtomicBool; SHARDS],
@@ -164,12 +168,23 @@ impl ModuleRecordStore {
     for (shard, records) in shards.iter().enumerate() {
       previous_per_shard[shard] = records.len();
     }
-    let previous =
+    let previous: FxHashMap<ArcStr, ModuleRecord> =
       shards.into_iter().flatten().map(|r| (ArcStr::from(r.id.as_str()), r)).collect();
+    let mut deps_by_file: FxHashMap<String, Vec<(String, u64)>> = FxHashMap::default();
+    for record in previous.values() {
+      let Some((file, _)) = record.files.first() else { continue };
+      let deps = deps_by_file.entry(file.clone()).or_default();
+      for dep in &record.files {
+        if !deps.contains(dep) {
+          deps.push(dep.clone());
+        }
+      }
+    }
     Self {
       dir,
       key: options.key.clone(),
       previous,
+      deps_by_file,
       previous_per_shard,
       dirty: std::array::from_fn(|_| AtomicBool::new(false)),
       invalidate: options.invalidate.iter().flatten().cloned().collect(),
@@ -207,11 +222,16 @@ impl ModuleRecordStore {
       self.stats.missing.fetch_add(1, Ordering::Relaxed);
       return None;
     };
-    if record.files.iter().any(|(file, _)| self.invalidate.contains(file)) {
+    let files = record
+      .files
+      .first()
+      .and_then(|(file, _)| self.deps_by_file.get(file))
+      .unwrap_or(&record.files);
+    if files.iter().any(|(file, _)| self.invalidate.contains(file)) {
       self.stats.invalidated.fetch_add(1, Ordering::Relaxed);
       return None;
     }
-    if record.files.iter().any(|(file, hash)| self.hash_file(file) != Some(*hash)) {
+    if files.iter().any(|(file, hash)| self.hash_file(file).unwrap_or(0) != *hash) {
       self.stats.changed.fetch_add(1, Ordering::Relaxed);
       return None;
     }

@@ -177,3 +177,46 @@ test('`meta` returned by `transform` is still there for reused modules', async (
   expect(await run()).toEqual([{ tag: 'from transform' }]);
   expect(await run()).toEqual([{ tag: 'from transform' }]);
 });
+
+test('ids of one file that differ by query share their dependencies', async () => {
+  // Like an SFC compiler: the main id's `transform` reads `data.txt` and declares it; the
+  // `?variant` id is produced in `load` from what that transform read, without declaring it.
+  fs.writeFileSync(
+    path.join(root, 'main.js'),
+    `import { dep } from './dep.js';\nimport variant from './dep.js?variant';\nconsole.log(dep, variant);\n`,
+  );
+  const run = async () => {
+    const loaded: string[] = [];
+    let seen = '';
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'sfc-like',
+          load(id) {
+            if (!id.endsWith('dep.js?variant')) return;
+            loaded.push('variant');
+            return `export default ${JSON.stringify(seen || fs.readFileSync(path.join(root, 'data.txt'), 'utf8'))};`;
+          },
+          transform(code, id) {
+            if (!id.endsWith('dep.js')) return;
+            this.addWatchFile(path.join(root, 'data.txt'));
+            seen = fs.readFileSync(path.join(root, 'data.txt'), 'utf8');
+            return code;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return { loaded, code: output.output[0].code };
+  };
+  expect((await run()).code).toContain('"one"');
+  expect((await run()).loaded).toEqual([]);
+  fs.writeFileSync(path.join(root, 'data.txt'), 'two');
+  const rebuilt = await run();
+  expect(rebuilt.loaded).toEqual(['variant']);
+  expect(rebuilt.code).toContain('"two"');
+});
