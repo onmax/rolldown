@@ -40,6 +40,13 @@ export function transformToRollupSourceMap(map: string): SourceMap {
   return obj;
 }
 
+/**
+ * The key a mutable output has in the shared bundle. A plugin can rename an output; until Rust
+ * returns it under the new name, the bundle still holds it under the old one, and its later
+ * changes must be reported under the key the bundle has now.
+ */
+const bundleKeys = new WeakMap<object, string>();
+
 function transformToRollupOutputChunk(bindingChunk: BindingOutputChunk): OutputChunk {
   return new OutputChunkImpl(bindingChunk);
 }
@@ -113,9 +120,9 @@ function transformToMutableRollupOutputChunk(
       cache[p] = value;
       return value;
     },
-    set(_target, p, newValue): boolean {
+    set(_target, p, newValue, receiver): boolean {
       cache[p] = newValue;
-      changed.updated.add(fileName);
+      changed.updated.add(bundleKeys.get(receiver) ?? fileName);
       return true;
     },
     has(target, p): boolean {
@@ -163,9 +170,9 @@ function transformToMutableRollupOutputAsset(
       cache[p] = value;
       return value;
     },
-    set(_target, p, newValue): boolean {
+    set(_target, p, newValue, receiver): boolean {
       cache[p] = newValue;
-      changed.updated.add(fileName);
+      changed.updated.add(bundleKeys.get(receiver) ?? fileName);
       return true;
     },
   });
@@ -312,6 +319,7 @@ export function transformToSharedOutputBundle(
   }
   for (const item of next) {
     if (target[item.fileName] !== item) target[item.fileName] = item;
+    bundleKeys.set(item, item.fileName);
   }
   return cache.bundle!;
 }

@@ -124,10 +124,12 @@ test('an output a plugin renamed keeps its object in the next hook', async () =>
       generateBundle(_, bundle) {
         const asset = Object.values(bundle).find((o) => o.fileName === 'new.txt')!;
         expect((asset as any).note).toBe('from a');
+        if (asset.type === 'asset') asset.source = 'from b';
         assets.push(asset);
       },
     },
   ]);
   expect(assets[1]).toBe(assets[0]);
-  expect(output.some((o) => o.fileName === 'new.txt')).toBe(true);
+  const renamed = output.find((o) => o.fileName === 'new.txt');
+  expect(renamed?.type === 'asset' && renamed.source).toBe('from b');
 });
