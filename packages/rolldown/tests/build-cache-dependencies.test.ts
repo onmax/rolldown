@@ -1041,3 +1041,9 @@ test('an import of a file replaced by a directory of the same name resolves agai
   fs.writeFileSync(path.join(root, 'lib.js/index.js'), `export default 'DIRECTORY';\n`);
   expect((await run()).code).toContain('"DIRECTORY"');
 });
+
+test('rolldown/experimental reports the buildCache capability', async () => {
+  const { experimentalCapabilities } = await import('rolldown/experimental');
+  expect(experimentalCapabilities.buildCache).toBe(1);
+  expect(Object.isFrozen(experimentalCapabilities)).toBe(true);
+});

@@ -21,6 +21,20 @@ export { resolveTsconfig } from './utils/resolve-tsconfig';
 
 export { defineParallelPlugin } from './plugin/parallel-plugin';
 
+/**
+ * The experimental features this build of Rolldown has, each with the version of its contract.
+ * Tools check a key here instead of comparing Rolldown versions; a key goes away when its feature
+ * leaves `experimental`.
+ *
+ * - `buildCache`: `experimental.buildCache` keeps each module's `load`, `transform` and
+ *   resolution results on disk and reuses them in a later build, in any process, while the files
+ *   they depend on (`this.addWatchFile` included) are unchanged; takes `invalidate`, and keeps
+ *   module `meta`.
+ */
+export const experimentalCapabilities: Readonly<{ buildCache: 1 }> = Object.freeze({
+  buildCache: 1,
+});
+
 // Builtin plugin factory
 export {
   isolatedDeclarationPlugin,
