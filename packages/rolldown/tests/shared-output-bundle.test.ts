@@ -51,6 +51,9 @@ test('generateBundle hooks of one build see one bundle, with earlier changes app
     },
   ]);
   expect(seen).toHaveLength(3);
+  // One object through changes, emitted files and deletions.
+  expect(seen[1]).toBe(seen[0]);
+  expect(seen[2]).toBe(seen[0]);
   const main = output.find((o) => o.type === 'chunk' && o.isEntry);
   expect(main?.type === 'chunk' && main.code.startsWith('/* first */')).toBe(true);
   expect(output.some((o) => o.fileName.startsWith('lazy'))).toBe(false);
@@ -71,4 +74,29 @@ test('outputs nobody changed keep their objects across generateBundle hooks', as
   ]);
   expect(objects[0]).toHaveLength(objects[1].length);
   objects[0].forEach((item, i) => expect(item).toBe(objects[1][i]));
+});
+
+test('a property a plugin sets on an output is there in the next hook, on the same object', async () => {
+  const chunks: unknown[] = [];
+  await generate([
+    {
+      name: 'a',
+      generateBundle(_, bundle) {
+        const main = Object.values(bundle).find((o) => o.type === 'chunk' && o.isEntry)!;
+        (main as any).note = 'from a';
+        main.type === 'chunk' && (main.code += '\n// a');
+        chunks.push(main);
+      },
+    },
+    {
+      name: 'b',
+      generateBundle(_, bundle) {
+        const main = Object.values(bundle).find((o) => o.type === 'chunk' && o.isEntry)!;
+        expect((main as any).note).toBe('from a');
+        expect(main.type === 'chunk' && main.code.endsWith('// a')).toBe(true);
+        chunks.push(main);
+      },
+    },
+  ]);
+  expect(chunks[1]).toBe(chunks[0]);
 });

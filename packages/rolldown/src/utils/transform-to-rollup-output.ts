@@ -231,6 +231,8 @@ export interface OutputBundleCache {
   changed: ChangedOutputs;
   context: MinimalPluginContext | null;
   items: Map<number, OutputChunk | OutputAsset>;
+  /** The object behind `bundle`, updated in place so `bundle` stays one object for the build. */
+  target: OutputBundle | null;
   bundle: OutputBundle | null;
 }
 
@@ -239,47 +241,78 @@ export function createOutputBundleCache(): OutputBundleCache {
     changed: { updated: new Set(), deleted: new Set() },
     context: null,
     items: new Map(),
+    target: null,
     bundle: null,
   };
 }
 
+/**
+ * The bundle for the next `generateBundle` or `writeBundle` call. Outputs whose native data is
+ * unchanged keep their wrapper. An output a plugin changed through its wrapper comes back from Rust
+ * as new data; it keeps its wrapper too, which already holds the change, along with any property
+ * Rust doesn't know about. Outputs added or removed in Rust are added to or removed from the same
+ * bundle object.
+ */
 export function transformToSharedOutputBundle(
   context: MinimalPluginContext,
   output: BindingOutputs,
   cache: OutputBundleCache,
   codeCache?: Map<string, OutputCodeCacheEntry>,
 ): OutputBundle {
+  const changedByPlugin = new Map<string, OutputChunk | OutputAsset>();
+  for (const fileName of cache.changed.updated) {
+    const item = cache.target?.[fileName];
+    if (item && !cache.changed.deleted.has(fileName)) changedByPlugin.set(fileName, item);
+  }
   cache.changed.updated.clear();
   cache.changed.deleted.clear();
   cache.context = context;
   const items = new Map<number, OutputChunk | OutputAsset>();
-  let reusedAll = cache.bundle !== null;
-  for (const chunk of output.chunks) {
-    const identity = chunk.getCodeIdentity();
+  const wrap = (
+    identity: number,
+    fileName: () => string,
+    create: () => OutputChunk | OutputAsset,
+  ) => {
     let item = cache.items.get(identity);
     if (!item) {
-      item = transformToMutableRollupOutputChunk(chunk, cache.changed, codeCache);
-      reusedAll = false;
+      const name = changedByPlugin.size > 0 ? fileName() : undefined;
+      item = (name !== undefined && changedByPlugin.get(name)) || create();
     }
     items.set(identity, item);
+  };
+  for (const chunk of output.chunks) {
+    wrap(
+      chunk.getCodeIdentity(),
+      () => chunk.getFileName(),
+      () => transformToMutableRollupOutputChunk(chunk, cache.changed, codeCache),
+    );
   }
   for (const asset of output.assets) {
-    const identity = asset.getIdentity();
-    let item = cache.items.get(identity);
-    if (!item) {
-      item = transformToMutableRollupOutputAsset(asset, cache.changed);
-      reusedAll = false;
-    }
-    items.set(identity, item);
+    wrap(
+      asset.getIdentity(),
+      () => asset.getFileName(),
+      () => transformToMutableRollupOutputAsset(asset, cache.changed),
+    );
   }
-  if (reusedAll && items.size === cache.items.size) return cache.bundle!;
   cache.items = items;
-  const bundle = Object.fromEntries([...items.values()].map((item) => [item.fileName, item]));
-  cache.bundle = new Proxy(
-    bundle,
-    bundleHandler(() => cache.context!, cache.changed),
-  );
-  return cache.bundle;
+  if (!cache.target) {
+    cache.target = {};
+    cache.bundle = new Proxy(
+      cache.target,
+      bundleHandler(() => cache.context!, cache.changed),
+    );
+  }
+  // Same object, same key order as Rust's outputs (plugins iterate it, e.g. for manifests).
+  const target = cache.target;
+  const next = [...items.values()];
+  const keys = Object.keys(target);
+  if (keys.length !== next.length || next.some((item, i) => keys[i] !== item.fileName)) {
+    for (const key of keys) delete target[key];
+  }
+  for (const item of next) {
+    if (target[item.fileName] !== item) target[item.fileName] = item;
+  }
+  return cache.bundle!;
 }
 
 export function collectChangedBundle(
