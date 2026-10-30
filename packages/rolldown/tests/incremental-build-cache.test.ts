@@ -430,6 +430,84 @@ test('a local package import follows a change to its package.json entry', async 
   expect(await run()).toContain('"b"');
 });
 
+test('a relative import of a directory follows its package.json entry', async () => {
+  const lib = path.join(root, 'lib');
+  fs.mkdirSync(lib);
+  fs.writeFileSync(path.join(lib, 'a.js'), `export default 'a';\n`);
+  fs.writeFileSync(path.join(lib, 'b.js'), `export default 'b';\n`);
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'app' }));
+  const manifest = (main: string) =>
+    fs.writeFileSync(path.join(lib, 'package.json'), JSON.stringify({ main }));
+  manifest('./a.js');
+  fs.writeFileSync(path.join(root, 'main.js'), `import v from './lib';\nconsole.log(v);\n`);
+  const run = async () => {
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"a"');
+  manifest('./b.js');
+  expect(await run()).toContain('"b"');
+});
+
+test('a bare import under tsconfig paths with several targets is resolved again', async () => {
+  fs.mkdirSync(path.join(root, 'preferred'));
+  fs.mkdirSync(path.join(root, 'fallback'));
+  fs.writeFileSync(path.join(root, 'fallback/foo.js'), `export default 'fallback';\n`);
+  fs.writeFileSync(
+    path.join(root, 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { paths: { '@lib/*': ['./preferred/*', './fallback/*'] } } }),
+  );
+  fs.writeFileSync(path.join(root, 'main.js'), `import v from '@lib/foo';\nconsole.log(v);\n`);
+  const run = async () => {
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      tsconfig: path.join(root, 'tsconfig.json'),
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"fallback"');
+  // Its other candidates aren't tracked, so the importer is not recorded.
+  expect(Object.values(records()).join('')).not.toContain('main.js');
+  fs.writeFileSync(path.join(root, 'preferred/foo.js'), `export default 'preferred';\n`);
+  expect(await run()).toContain('"preferred"');
+});
+
+test('files a virtual module watches are listed for whole-build reuse', async () => {
+  fs.writeFileSync(path.join(root, 'main.js'), `import v from 'virtual:data';\nconsole.log(v);\n`);
+  const bundle = await rolldown({
+    input: './main.js',
+    cwd: root,
+    plugins: [
+      {
+        name: 'virtual',
+        resolveId(id) {
+          if (id === 'virtual:data') return '\0virtual:data';
+        },
+        load(id) {
+          if (id !== '\0virtual:data') return;
+          this.addWatchFile(path.join(root, 'data.txt'));
+          return `export default ${JSON.stringify(fs.readFileSync(path.join(root, 'data.txt'), 'utf8'))};`;
+        },
+      },
+    ],
+    experimental: { incrementalBuildCache: { dir: cacheDir } },
+  });
+  await bundle.generate({ format: 'esm' });
+  await bundle.close();
+  const listed = JSON.parse(fs.readFileSync(path.join(cacheDir, 'unrecorded-deps.json'), 'utf8'));
+  expect(listed).toContain(path.join(root, 'data.txt'));
+});
+
 test('a directory passed to addWatchFile invalidates when its entries change', async () => {
   const data = path.join(root, 'data');
   fs.mkdirSync(data);

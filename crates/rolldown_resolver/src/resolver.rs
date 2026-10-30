@@ -103,6 +103,14 @@ impl<Fs: FileSystem> Resolver<Fs> {
     self.package_json_cache.clear();
   }
 
+  /// Whether the tsconfig governing `file` maps some `paths` pattern to more than one target, so
+  /// a bare import from it can change resolution when a file appears in an earlier target.
+  pub fn has_path_fallbacks(&self, file: &Path) -> bool {
+    self.import_resolver.find_tsconfig(file).ok().flatten().is_some_and(|tsconfig| {
+      tsconfig.compiler_options.paths.as_ref().is_some_and(|paths| paths.values().any(|t| t.len() > 1))
+    })
+  }
+
   pub fn resolve_tsconfig<T: AsRef<Path>>(
     &self,
     path: &T,

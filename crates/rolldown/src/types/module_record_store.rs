@@ -344,9 +344,11 @@ impl ModuleRecordStore {
   /// one the JS side handed over for its id (`""` for none); without an entry, it stays as it was.
   /// A shard whose records are the previous ones, unchanged, is not written again.
   ///
-  /// When some module could not be recorded, its dependencies are unknown to the records, so the
-  /// files the whole build watched are written to `UNRECORDED_DEPS`: a tool that reuses a whole
-  /// build's output from this cache must check them too. The file is removed otherwise.
+  /// Modules that are not recorded (virtual ones, those that emitted files or depend on unreadable
+  /// ones) have dependencies no record lists, so the files this build watched, which include every
+  /// module whose hooks ran, are also written to `UNRECORDED_DEPS` (rewritten only when it
+  /// changes): a tool that reuses a whole build's output from this cache checks them with the
+  /// records.
   pub fn save(
     &self,
     meta: &FxDashMap<ArcStr, ArcStr>,
@@ -380,19 +382,13 @@ impl ModuleRecordStore {
     }
     std::fs::create_dir_all(&self.dir)?;
     let unrecorded = self.dir.join(UNRECORDED_DEPS);
-    if self.unrecordable_files.is_empty() {
-      if unrecorded.exists() {
-        std::fs::remove_file(&unrecorded)?;
-      }
-    } else {
-      let mut files: Vec<String> = watch_files.iter().map(|f| f.key().to_string()).collect();
-      files.extend(self.unrecordable_files.iter().map(|f| f.key().clone()));
-      files.sort_unstable();
-      files.dedup();
-      let bytes = serde_json::to_vec(&files)?;
-      if std::fs::read(&unrecorded).ok().as_deref() != Some(bytes.as_slice()) {
-        std::fs::write(&unrecorded, bytes)?;
-      }
+    let mut files: Vec<String> = watch_files.iter().map(|f| f.key().to_string()).collect();
+    files.extend(self.unrecordable_files.iter().map(|f| f.key().clone()));
+    files.sort_unstable();
+    files.dedup();
+    let bytes = serde_json::to_vec(&files)?;
+    if std::fs::read(&unrecorded).ok().as_deref() != Some(bytes.as_slice()) {
+      std::fs::write(&unrecorded, bytes)?;
     }
     let written = shards
       .into_iter()

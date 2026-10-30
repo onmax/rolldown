@@ -195,7 +195,19 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     if let Some(store) = module_records {
       let resolved = |mut record: ModuleRecord| {
         record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
-        for dir in Self::resolution_dirs(id.as_str(), &raw_import_records, &resolved_deps) {
+        let package_json = self.resolved_id.package_json.as_ref().map(|p| p.realpath());
+        let path_fallbacks = |file: &str| self.ctx.resolver.has_path_fallbacks(std::path::Path::new(file));
+        let Some(dirs) = Self::resolution_dirs(
+          id.as_str(),
+          package_json,
+          &raw_import_records,
+          &resolved_deps,
+          path_fallbacks,
+        ) else {
+          store.unrecordable(&record.files[0].0);
+          return;
+        };
+        for dir in dirs {
           let Some(hash) = store.hash_file(&dir) else {
             store.unrecordable(&record.files[0].0);
             return;
@@ -367,14 +379,21 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
   /// directory it points into named like its last segment (`./dep` → `dep*`); for each resolved
   /// file outside `node_modules`, the entries next to it named like its stem (`Foo.vue` → `Foo*`),
   /// and for an `index` file the entries named like its directory (`dep.js` beats `dep/index.js`).
-  /// A bare specifier that resolves to a local package (outside `node_modules`) also depends on
-  /// that package's `package.json` (its `exports`, `main`, `imports`). Packages in `node_modules`
-  /// are covered by the caller's `key` (lockfile).
+  /// An import that resolves into a local package other than the importer's (outside
+  /// `node_modules`; `./lib` with its own `package.json` counts), or any bare import of a local
+  /// package, also depends on that `package.json` (`exports`, `main`, `imports`); an `index` file
+  /// also depends on the entries named `package.json` beside it, since one appearing there can
+  /// redirect the directory. Packages in `node_modules` are covered by the caller's `key`
+  /// (lockfile). `None`: a bare import resolved to a local file from a module whose tsconfig has
+  /// `paths` fallbacks (several targets), whose other candidates aren't tracked yet; such a
+  /// module is not recorded.
   fn resolution_dirs(
     importer: &str,
+    importer_package_json: Option<&std::path::Path>,
     raw_import_records: &IndexVec<rolldown_common::ImportRecordIdx, rolldown_common::RawImportRecord>,
     resolved_deps: &IndexVec<rolldown_common::ImportRecordIdx, ResolvedId>,
-  ) -> Vec<String> {
+    path_fallbacks: impl Fn(&str) -> bool,
+  ) -> Option<Vec<String>> {
     use std::path::Path;
     let mut deps: Vec<String> = vec![];
     let mut push = |path: &Path| {
@@ -392,10 +411,21 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       }
     }
     let mut package_jsons: Vec<String> = vec![];
+    let mut checked_fallbacks = false;
     for (record, dep) in raw_import_records.iter().zip(resolved_deps.iter()) {
       let specifier = record.module_request.as_str();
-      if let Some(package_json) = dep.package_json.as_ref().map(|p| p.realpath().to_string_lossy())
-        && !specifier.starts_with(['.', '/', '\0'])
+      let bare = !specifier.starts_with(['.', '/', '\0']);
+      let local = ModuleRecordStore::file_of(dep.id.as_str()).is_some_and(|f| !f.contains("/node_modules/"));
+      if bare && local && !checked_fallbacks {
+        checked_fallbacks = true;
+        if ModuleRecordStore::file_of(importer).is_some_and(&path_fallbacks) {
+          return None;
+        }
+      }
+      let Some(package_json) = dep.package_json.as_ref().map(|p| p.realpath()) else { continue };
+      let other_package = importer_package_json != Some(package_json);
+      let package_json = package_json.to_string_lossy();
+      if (bare || other_package)
         && !package_json.contains("/node_modules/")
         && !package_jsons.iter().any(|d| *d == package_json)
       {
@@ -408,11 +438,12 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       push(&dir.join(stem));
       if stem == "index" {
         push(dir);
+        push(&dir.join("package.json"));
       }
     }
     deps.extend(package_jsons);
     deps.sort_unstable();
-    deps
+    Some(deps)
   }
 
   #[tracing::instrument(level = "debug", skip_all)]
