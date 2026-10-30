@@ -100,3 +100,34 @@ test('a property a plugin sets on an output is there in the next hook, on the sa
   ]);
   expect(chunks[1]).toBe(chunks[0]);
 });
+
+test('an output a plugin renamed keeps its object in the next hook', async () => {
+  const assets: unknown[] = [];
+  const output = await generate([
+    {
+      name: 'emit',
+      generateBundle() {
+        this.emitFile({ type: 'asset', fileName: 'old.txt', source: 'x' });
+      },
+    },
+    {
+      name: 'a',
+      generateBundle(_, bundle) {
+        const asset = bundle['old.txt']!;
+        (asset as any).note = 'from a';
+        asset.fileName = 'new.txt';
+        assets.push(asset);
+      },
+    },
+    {
+      name: 'b',
+      generateBundle(_, bundle) {
+        const asset = Object.values(bundle).find((o) => o.fileName === 'new.txt')!;
+        expect((asset as any).note).toBe('from a');
+        assets.push(asset);
+      },
+    },
+  ]);
+  expect(assets[1]).toBe(assets[0]);
+  expect(output.some((o) => o.fileName === 'new.txt')).toBe(true);
+});

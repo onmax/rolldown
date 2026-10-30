@@ -262,7 +262,8 @@ export function transformToSharedOutputBundle(
   const changedByPlugin = new Map<string, OutputChunk | OutputAsset>();
   for (const fileName of cache.changed.updated) {
     const item = cache.target?.[fileName];
-    if (item && !cache.changed.deleted.has(fileName)) changedByPlugin.set(fileName, item);
+    // Rust returns it under the file name the wrapper holds now (a plugin may have renamed it).
+    if (item && !cache.changed.deleted.has(fileName)) changedByPlugin.set(item.fileName, item);
   }
   cache.changed.updated.clear();
   cache.changed.deleted.clear();
