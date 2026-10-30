@@ -548,3 +548,9 @@ test('a new file that wins a resolution re-runs the importer', async () => {
   expect(rebuilt.files['main.js']).toEqual((await build({ cache: false })).files['main.js']);
   expect(rebuilt.files['main.js']).toContain('"file"');
 });
+
+test('rolldown/experimental reports the incrementalBuildCache capability', async () => {
+  const { experimentalCapabilities } = await import('rolldown/experimental');
+  expect(experimentalCapabilities.incrementalBuildCache).toBe(1);
+  expect(Object.isFrozen(experimentalCapabilities)).toBe(true);
+});
