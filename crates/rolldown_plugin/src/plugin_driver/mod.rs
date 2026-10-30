@@ -18,7 +18,7 @@ use rolldown_common::{
   ModuleId, ModuleIdx, ModuleInfo, ModuleLoaderMsg, PluginIdx, SharedFileEmitter,
   SharedModuleInfoDashMap, WatchPath,
 };
-use rolldown_utils::dashmap::FxDashSet;
+use rolldown_utils::dashmap::{FxDashMap, FxDashSet};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -45,6 +45,12 @@ pub struct PluginDriver {
   /// Modules whose `transform` hooks called `this.emitFile`. Their results are not kept in
   /// `experimental.incrementalBuildCache`, since reusing them would drop the emitted files.
   pub modules_with_transform_emitted_files: FxDashSet<ModuleIdx>,
+  /// `experimental.incrementalBuildCache`: the `meta` (JSON) kept in the record of each module
+  /// the scan reused, `None` for a module it processed. Absent until the module's task decides.
+  pub reused_module_meta: FxDashMap<ArcStr, Option<ArcStr>>,
+  /// `experimental.incrementalBuildCache`: the `meta` (JSON, `""` for none) of the modules the JS
+  /// side knows, handed over at the end of the scan, to be kept in the records this build writes.
+  pub module_meta_for_cache: FxDashMap<ArcStr, ArcStr>,
   context_load_completion_manager: ContextLoadCompletionManager,
   pub(crate) tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModuleLoaderMsg>>>>,
   /// Outlives the `Bundle` through `BundleHandle`, which is how the binding reads them
@@ -60,6 +66,8 @@ impl PluginDriver {
     // by BundleFactory which manages its lifecycle (reset on full builds only)
     self.context_load_completion_manager.clear();
     self.file_emitter.clear();
+    self.reused_module_meta.clear();
+    self.module_meta_for_cache.clear();
   }
 
   pub fn set_module_info(&self, module_id: &ModuleId, module_info: Arc<ModuleInfo>) {

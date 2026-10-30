@@ -97,6 +97,8 @@ impl PluginDriverFactory {
         module_infos,
         transform_dependencies,
         modules_with_transform_emitted_files: FxDashSet::default(),
+        reused_module_meta: rolldown_utils::dashmap::FxDashMap::default(),
+        module_meta_for_cache: rolldown_utils::dashmap::FxDashMap::default(),
         context_load_completion_manager: ContextLoadCompletionManager::default(),
         tx,
         // The JavaScript side registers this callback only when it is measuring, so its

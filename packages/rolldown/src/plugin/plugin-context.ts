@@ -288,6 +288,7 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
     private currentLoadingModule?: string,
   ) {
     super(onLog, logLevel, plugin.name!, watchMode);
+    data.bindingContext ??= context;
     this.getModuleInfo = (id: string) => this.data.getModuleInfo(id, context);
   }
 

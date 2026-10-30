@@ -134,6 +134,19 @@ impl BindingPluginContext {
   pub fn add_watch_file(&self, file: String) {
     self.inner.add_watch_file(&file);
   }
+
+  /// `experimental.incrementalBuildCache`: the `meta` JSON kept for a module the scan reused, `""`
+  /// when there is none to restore, `null` while the module's task hasn't decided.
+  #[napi]
+  pub fn get_reused_module_meta(&self, module_id: String) -> Option<String> {
+    self.inner.reused_module_meta(&module_id).map(|meta| meta.map(|m| m.to_string()).unwrap_or_default())
+  }
+
+  /// `experimental.incrementalBuildCache`: the `meta` JSON of modules, to keep in their records.
+  #[napi]
+  pub fn set_module_meta_for_cache(&self, ids: Vec<String>, metas: Vec<String>) {
+    self.inner.set_module_meta_for_cache(ids.into_iter().zip(metas).map(|(id, meta)| (id.into(), meta.into())));
+  }
 }
 
 impl From<PluginContext> for BindingPluginContext {

@@ -9,8 +9,14 @@
 //!
 //! A record is reused when the file behind the module id (without its query) and every file the
 //! hooks depended on (`this.addWatchFile` in `transform`, the module's tsconfig) hash the same as
-//! when it was recorded, and the caller did not list the file in `invalidate`. Records of virtual
-//! modules, of binary modules and of builds with native magic string are not kept.
+//! when it was recorded, and the caller did not list the file in `invalidate`. Directories count as
+//! dependencies by their entry names: the entries of the directories its imports resolved into
+//! that are named like the import (`entries_dep`), so that a new file that would win the
+//! resolution (`dep.js` next to `dep/index.js`) re-runs the importer, and all entries of a
+//! directory passed to `addWatchFile`. A file that is missing is recorded as missing; one that
+//! exists but can't be read makes the module unrecordable. Records of virtual modules, of binary
+//! modules, of builds with native magic string, and of every id of a file one of whose ids called
+//! `emitFile` from `transform`, are not kept.
 //! See internal-docs/cache/implementation.md ("Module record store").
 
 use std::{
@@ -34,10 +40,14 @@ use rolldown_utils::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 /// Records are split by id into shards, so a build that changed a few modules rewrites a few
 /// shards instead of every record.
 const SHARDS: usize = 32;
+
+/// The hash recorded for a dependency that doesn't exist.
+pub const MISSING: u64 = 0;
+const DIR_SEED: u64 = 0x0d1e_c70e;
 
 fn shard_of(id: &str) -> usize {
   (xxhash_rust::xxh3::xxh3_64(id.as_bytes()) % SHARDS as u64) as usize
@@ -74,6 +84,9 @@ pub struct ModuleRecord {
   pub hook_side_effects: Option<u8>,
   pub sourcemap_chain: Vec<RecordedSourcemap>,
   pub resolved_deps: Vec<RecordedResolvedId>,
+  /// The module's `meta` from JS plugins (JSON), restored when the record is reused.
+  #[serde(default)]
+  pub meta: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +151,9 @@ pub struct ModuleRecordStore {
   // Stands in for a plugin-declared opt-out until `shouldTransformCachedModule` exists.
   exclude: Vec<String>,
   next: FxDashMap<ArcStr, Arc<ModuleRecord>>,
+  /// Files with an id that can't be recorded this build; none of their ids is kept, since the
+  /// dependencies of the one left out would be missing from the others.
+  unrecordable_files: FxDashMap<String, ()>,
   file_hashes: FxDashMap<String, Option<u64>>,
   pub stats: ModuleRecordStats,
 }
@@ -192,6 +208,7 @@ impl ModuleRecordStore {
         .map(|v| v.split(',').filter(|s| !s.is_empty()).map(ToString::to_string).collect())
         .unwrap_or_default(),
       next: FxDashMap::default(),
+      unrecordable_files: FxDashMap::default(),
       file_hashes: FxDashMap::default(),
       stats: ModuleRecordStats::default(),
     }
@@ -203,13 +220,46 @@ impl ModuleRecordStore {
     (!file.starts_with('\0') && Path::new(file).is_absolute()).then_some(file)
   }
 
+  /// The hash of a dependency: a file's content, a directory's sorted entry names, `MISSING` for a
+  /// path that doesn't exist, `None` when it exists but can't be read.
   pub fn hash_file(&self, file: &str) -> Option<u64> {
     if let Some(hash) = self.file_hashes.get(file) {
       return *hash;
     }
-    let hash = std::fs::read(file).ok().map(|bytes| xxhash_rust::xxh3::xxh3_64(&bytes));
+    let entries = |dir: &str, prefix: &str| match std::fs::read_dir(dir) {
+      Ok(entries) => {
+        let mut names = entries
+          .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+          .filter(|name| name.as_ref().map_or(true, |name| name.starts_with(prefix)))
+          .collect::<Result<Vec<_>, _>>()
+          .ok()?;
+        names.sort_unstable();
+        Some(xxhash_rust::xxh3::xxh3_64_with_seed(names.join("\0").as_bytes(), DIR_SEED))
+      }
+      Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(MISSING),
+      Err(_) => None,
+    };
+    let hash = if let Some((dir, prefix)) = file.split_once('\0') {
+      entries(dir, prefix)
+    } else {
+      match std::fs::read(file) {
+        Ok(bytes) => Some(xxhash_rust::xxh3::xxh3_64(&bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(MISSING),
+        Err(_) => entries(file, ""),
+      }
+    };
     self.file_hashes.insert(file.to_string(), hash);
     hash
+  }
+
+  /// A dependency on the entries of `dir` whose names start with `prefix` (NUL can't be in a path).
+  pub fn entries_dep(dir: &str, prefix: &str) -> String {
+    format!("{dir}\0{prefix}")
+  }
+
+  /// Leaves every id of `file` out of the records this build writes.
+  pub fn unrecordable(&self, file: &str) {
+    self.unrecordable_files.insert(file.to_string(), ());
   }
 
   /// The record of `id` when all the files it depends on are unchanged.
@@ -249,7 +299,7 @@ impl ModuleRecordStore {
       self.stats.invalidated.fetch_add(1, Ordering::Relaxed);
       return None;
     }
-    if files.iter().any(|(file, hash)| self.hash_file(file).unwrap_or(0) != *hash) {
+    if files.iter().any(|(file, hash)| self.hash_file(file) != Some(*hash)) {
       self.stats.changed.fetch_add(1, Ordering::Relaxed);
       return None;
     }
@@ -266,12 +316,33 @@ impl ModuleRecordStore {
     self.next.insert(ArcStr::from(record.id.as_str()), Arc::new(record));
   }
 
-  /// Writes the records of this build, replacing the previous ones. A shard whose records are
-  /// the previous ones, unchanged, is not written again.
-  pub fn save(&self) -> std::io::Result<usize> {
+  /// Writes the records of this build, replacing the previous ones. A record's `meta` becomes the
+  /// one the JS side handed over for its id (`""` for none); without an entry, it stays as it was.
+  /// A shard whose records are the previous ones, unchanged, is not written again.
+  pub fn save(&self, meta: &FxDashMap<ArcStr, ArcStr>) -> std::io::Result<usize> {
     let mut shards: Vec<Vec<Arc<ModuleRecord>>> = vec![Vec::new(); SHARDS];
     for entry in &self.next {
-      shards[shard_of(entry.key())].push(Arc::clone(entry.value()));
+      let mut record = Arc::clone(entry.value());
+      let shard = shard_of(entry.key());
+      if record.files.first().is_some_and(|(file, _)| self.unrecordable_files.contains_key(file)) {
+        self.dirty[shard].store(true, Ordering::Relaxed);
+        continue;
+      }
+      // `!`: the module's `meta` can't be kept (not JSON), so neither can the module.
+      if meta.get(entry.key()).is_some_and(|m| m.as_str() == "!") {
+        self.dirty[shard].store(true, Ordering::Relaxed);
+        continue;
+      }
+      let next_meta = match meta.get(entry.key()) {
+        Some(m) if m.is_empty() => None,
+        Some(m) => Some(m.value().to_string()),
+        None => record.meta.clone(),
+      };
+      if record.meta != next_meta {
+        Arc::make_mut(&mut record).meta = next_meta;
+        self.dirty[shard].store(true, Ordering::Relaxed);
+      }
+      shards[shard].push(record);
     }
     std::fs::create_dir_all(&self.dir)?;
     let written = shards

@@ -197,6 +197,21 @@ impl NativePluginContextImpl {
     self.module_infos.iter().map(|v| v.key().clone()).collect()
   }
 
+  /// See `PluginDriver::reused_module_meta`: `None` while the module's task hasn't decided,
+  /// `Some(None)` when there is no kept `meta` to restore.
+  pub fn reused_module_meta(&self, module_id: &str) -> Option<Option<ArcStr>> {
+    self.plugin_driver.upgrade()?.reused_module_meta.get(module_id).map(|v| v.value().clone())
+  }
+
+  /// See `PluginDriver::module_meta_for_cache`.
+  pub fn set_module_meta_for_cache(&self, entries: impl IntoIterator<Item = (ArcStr, ArcStr)>) {
+    if let Some(plugin_driver) = self.plugin_driver.upgrade() {
+      for (id, meta) in entries {
+        plugin_driver.module_meta_for_cache.insert(id, meta);
+      }
+    }
+  }
+
   pub fn cwd(&self) -> &PathBuf {
     self.resolver.cwd()
   }

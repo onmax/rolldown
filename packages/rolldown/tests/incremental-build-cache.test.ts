@@ -220,3 +220,148 @@ test('ids of one file that differ by query share their dependencies', async () =
   expect(rebuilt.loaded).toEqual(['variant']);
   expect(rebuilt.code).toContain('"two"');
 });
+
+test('`meta` of a module whose hooks run again comes only from this build', async () => {
+  const run = async () => {
+    let seen: unknown;
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'meta',
+          transform(code, id) {
+            if (id.endsWith('main.js') && code.includes('tagged'))
+              return { meta: { meta: { tag: 1 } } };
+          },
+          renderChunk(_code, chunk) {
+            const id = chunk.moduleIds.find((m) => m.endsWith('main.js'));
+            if (id) seen = this.getModuleInfo(id)?.meta.meta;
+            return null;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return seen;
+  };
+  fs.writeFileSync(path.join(root, 'main.js'), `console.log('tagged');\n`);
+  expect(await run()).toEqual({ tag: 1 });
+  fs.writeFileSync(path.join(root, 'main.js'), `console.log('plain');\n`);
+  expect(await run()).toBeUndefined();
+});
+
+test('`meta` nobody reads in a build is still kept for the next one', async () => {
+  let read = true;
+  const run = async () => {
+    let seen: unknown;
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'meta',
+          transform(_code, id) {
+            if (id.endsWith('main.js')) return { meta: { meta: { tag: 1 } } };
+          },
+          renderChunk(_code, chunk) {
+            const id = chunk.moduleIds.find((m) => m.endsWith('main.js'));
+            if (id && read) seen = this.getModuleInfo(id)?.meta.meta;
+            return null;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return seen;
+  };
+  expect(await run()).toEqual({ tag: 1 });
+  read = false;
+  await run();
+  read = true;
+  expect(await run()).toEqual({ tag: 1 });
+});
+
+test('no id of a file is kept when one of its ids emitted a file', async () => {
+  // The main id declares `data.txt` and emits a file, so it is never recorded; the `?variant` id
+  // built from what it read must not be reused with its dependency missing.
+  fs.writeFileSync(
+    path.join(root, 'main.js'),
+    `import { dep } from './dep.js';\nimport variant from './dep.js?variant';\nconsole.log(dep, variant);\n`,
+  );
+  const run = async () => {
+    let seen = '';
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'sfc-like',
+          load(id) {
+            if (!id.endsWith('dep.js?variant')) return;
+            return `export default ${JSON.stringify(seen || fs.readFileSync(path.join(root, 'data.txt'), 'utf8'))};`;
+          },
+          transform(code, id) {
+            if (!id.endsWith('dep.js')) return;
+            this.addWatchFile(path.join(root, 'data.txt'));
+            seen = fs.readFileSync(path.join(root, 'data.txt'), 'utf8');
+            this.emitFile({ type: 'asset', fileName: 'side.txt', source: seen });
+            return code;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"one"');
+  fs.writeFileSync(path.join(root, 'data.txt'), 'two');
+  expect(await run()).toContain('"two"');
+});
+
+test('a directory passed to addWatchFile invalidates when its entries change', async () => {
+  const data = path.join(root, 'data');
+  fs.mkdirSync(data);
+  fs.writeFileSync(path.join(data, 'a.txt'), '');
+  const run = async () => {
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'list-dir',
+          transform(_code, id) {
+            if (!id.endsWith('main.js')) return;
+            this.addWatchFile(data);
+            return `console.log(${JSON.stringify(fs.readdirSync(data).sort())});`;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"a.txt"');
+  fs.writeFileSync(path.join(data, 'b.txt'), '');
+  expect(await run()).toContain('"b.txt"');
+});
+
+test('a new file that wins a resolution re-runs the importer', async () => {
+  fs.writeFileSync(path.join(root, 'main.js'), `import { lib } from './lib';\nconsole.log(lib);\n`);
+  fs.mkdirSync(path.join(root, 'lib'));
+  fs.writeFileSync(path.join(root, 'lib', 'index.js'), `export const lib = 'index';\n`);
+  const first = await build();
+  expect(first.files['main.js']).toContain('"index"');
+  fs.writeFileSync(path.join(root, 'lib.js'), `export const lib = 'file';\n`);
+  const rebuilt = await build();
+  expect(rebuilt.files['main.js']).toEqual((await build({ cache: false })).files['main.js']);
+  expect(rebuilt.files['main.js']).toContain('"file"');
+});

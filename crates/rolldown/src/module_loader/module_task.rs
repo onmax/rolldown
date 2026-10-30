@@ -120,6 +120,12 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       let chain = record.sourcemap_chain.iter().map(RecordedSourcemap::decode).collect::<Option<Vec<_>>>()?;
       Some((record, chain))
     });
+    if module_records.is_some() {
+      self.ctx.plugin_driver.reused_module_meta.insert(
+        id.as_arc_str().clone(),
+        reused.as_ref().and_then(|(record, _)| record.meta.as_deref().map(ArcStr::from)),
+      );
+    }
     let (source, module_type) = if let Some((record, chain)) = &reused {
       sourcemap_chain.clone_from(chain);
       hook_side_effects = record.hook_side_effects.map(decode_hook_side_effects);
@@ -187,19 +193,23 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       .await?
     };
     if let Some(store) = module_records {
+      let resolved = |mut record: ModuleRecord| {
+        record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
+        for dir in Self::resolution_dirs(id.as_str(), &raw_import_records, &resolved_deps) {
+          let Some(hash) = store.hash_file(&dir) else {
+            store.unrecordable(&record.files[0].0);
+            return;
+          };
+          if !record.files.iter().any(|(f, _)| *f == dir) {
+            record.files.push((dir, hash));
+          }
+        }
+        store.keep(record, false);
+      };
       match (reused, new_record) {
         (Some((record, _)), _) if reused_deps => store.keep(record.clone(), true),
-        (Some((record, _)), _) => store.keep(
-          ModuleRecord {
-            resolved_deps: resolved_deps.iter().map(RecordedResolvedId::encode).collect(),
-            ..record.clone()
-          },
-          false,
-        ),
-        (None, Some(mut record)) => {
-          record.resolved_deps = resolved_deps.iter().map(RecordedResolvedId::encode).collect();
-          store.keep(record, false);
-        }
+        (Some((record, _)), _) => resolved(record.clone()),
+        (None, Some(record)) => resolved(record),
         (None, None) => {}
       }
     }
@@ -303,12 +313,17 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     hook_side_effects: Option<rolldown_common::side_effects::HookSideEffects>,
     sourcemap_chain: &[SourcemapChainElement],
   ) -> Option<ModuleRecord> {
-    if self.ctx.plugin_driver.modules_with_transform_emitted_files.contains(&self.module_idx) {
-      return None;
-    }
     let id = self.resolved_id.id.as_str();
     let file = ModuleRecordStore::file_of(id)?;
-    let mut files = vec![(file.to_string(), store.hash_file(file)?)];
+    if self.ctx.plugin_driver.modules_with_transform_emitted_files.contains(&self.module_idx) {
+      store.unrecordable(file);
+      return None;
+    }
+    let Some(hash) = store.hash_file(file) else {
+      store.unrecordable(file);
+      return None;
+    };
+    let mut files = vec![(file.to_string(), hash)];
     let mut extra: Vec<String> = self
       .ctx
       .plugin_driver
@@ -324,7 +339,10 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     extra.sort_unstable();
     extra.dedup();
     for dep in extra {
-      let hash = store.hash_file(&dep).unwrap_or(0);
+      let Some(hash) = store.hash_file(&dep) else {
+        store.unrecordable(file);
+        return None;
+      };
       files.push((dep, hash));
     }
     Some(ModuleRecord {
@@ -340,7 +358,47 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
         vec![]
       },
       resolved_deps: vec![],
+      meta: None,
     })
+  }
+
+  /// Directory entries that decide what this module's imports resolve to, as
+  /// `ModuleRecordStore::entries_dep` paths: for each relative specifier, the entries of the
+  /// directory it points into named like its last segment (`./dep` → `dep*`); for each resolved
+  /// file outside `node_modules`, the entries next to it named like its stem (`Foo.vue` → `Foo*`),
+  /// and for an `index` file the entries named like its directory (`dep.js` beats `dep/index.js`).
+  /// Packages are covered by the caller's `key` (lockfile).
+  fn resolution_dirs(
+    importer: &str,
+    raw_import_records: &IndexVec<rolldown_common::ImportRecordIdx, rolldown_common::RawImportRecord>,
+    resolved_deps: &IndexVec<rolldown_common::ImportRecordIdx, ResolvedId>,
+  ) -> Vec<String> {
+    use std::path::Path;
+    let mut deps: Vec<String> = vec![];
+    let mut push = |path: &Path| {
+      let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+      let dep = ModuleRecordStore::entries_dep(&dir.to_string_lossy(), &name.to_string_lossy());
+      if !dep.contains("/node_modules/") && !deps.contains(&dep) {
+        deps.push(dep);
+      }
+    };
+    let importer_dir = ModuleRecordStore::file_of(importer).and_then(|f| Path::new(f).parent());
+    for record in raw_import_records {
+      let specifier = record.module_request.as_str();
+      if let (Some(base), true) = (importer_dir, specifier.starts_with('.')) {
+        push(&normalize_path(&base.join(specifier)));
+      }
+    }
+    for dep in resolved_deps {
+      let Some(file) = ModuleRecordStore::file_of(dep.id.as_str()).map(Path::new) else { continue };
+      let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else { continue };
+      push(&dir.join(stem));
+      if stem == "index" {
+        push(dir);
+      }
+    }
+    deps.sort_unstable();
+    deps
   }
 
   #[tracing::instrument(level = "debug", skip_all)]
@@ -421,4 +479,20 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     }
     Ok((source, module_type))
   }
+}
+
+/// `a/./b/../c` → `a/c`, without touching the file system.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+  use std::path::Component;
+  let mut out = std::path::PathBuf::new();
+  for c in path.components() {
+    match c {
+      Component::CurDir => {}
+      Component::ParentDir => {
+        out.pop();
+      }
+      c => out.push(c.as_os_str()),
+    }
+  }
+  out
 }

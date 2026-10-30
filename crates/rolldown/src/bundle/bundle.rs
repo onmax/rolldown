@@ -272,7 +272,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     let output = result?;
     if let Some(store) = &self.module_records {
       let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
-      let written = store.save().with_context(|| {
+      let written = store.save(&self.plugin_driver.module_meta_for_cache).with_context(|| {
         format!("Could not write the incremental build cache: {}", store.stats_line())
       })?;
       timer.lap(&format!("save-module-records ({}) shards-written {written}", store.stats_line()));

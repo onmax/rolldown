@@ -60,6 +60,14 @@ export class PluginContextData {
   renderedChunkMeta: RenderedChunkMeta | null = null;
   normalizedInputOptions: NormalizedInputOptions | null = null;
   normalizedOutputOptions: NormalizedOutputOptions | null = null;
+  /**
+   * `experimental.incrementalBuildCache` is on: a reused module's `meta` comes from its record.
+   * `bindingContext` is any plugin context of the current build (they share one plugin driver),
+   * for asking Rust; `keptMetaChecked` holds the ids already asked.
+   */
+  incrementalBuildCache = false;
+  bindingContext: BindingPluginContext | null = null;
+  private keptMetaChecked = new Set<string>();
 
   constructor(
     private onLog: LogHandler,
@@ -91,16 +99,30 @@ export class PluginContextData {
   }
 
   getModuleOption(id: string): ModuleOptions {
-    const option = this.moduleOptionMap.get(id);
+    let option = this.moduleOptionMap.get(id);
     if (!option) {
-      const raw: ModuleOptions = {
+      option = {
         moduleSideEffects: null,
         meta: {},
       };
-      this.moduleOptionMap.set(id, raw);
-      return raw;
+      this.moduleOptionMap.set(id, option);
     }
+    if (this.incrementalBuildCache) this.restoreKeptMeta(id, option);
     return option;
+  }
+
+  /** Adds the `meta` kept in a reused module's record under what hooks set this build. */
+  private restoreKeptMeta(id: string, option: ModuleOptions): void {
+    if (this.keptMetaChecked.has(id) || !this.bindingContext) return;
+    const kept = this.bindingContext.getReusedModuleMeta(id);
+    // The module's task hasn't decided yet; ask again on the next read.
+    if (kept == null) return;
+    this.keptMetaChecked.add(id);
+    if (!kept) return;
+    option.meta ??= {};
+    for (const [key, value] of Object.entries(JSON.parse(kept))) {
+      if (!(key in option.meta)) option.meta[key] = value;
+    }
   }
 
   getModuleInfo(id: string, context: BindingPluginContext): ModuleInfo | null {
@@ -181,5 +203,7 @@ export class PluginContextData {
     // Watch mode reuses this object across rebuilds; entries hold the previous build's chunk data.
     this.outputCodeCache?.clear();
     this.outputBundleCache = createOutputBundleCache();
+    this.bindingContext = null;
+    this.keptMetaChecked.clear();
   }
 }

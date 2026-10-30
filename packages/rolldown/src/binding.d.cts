@@ -1841,6 +1841,13 @@ export declare class BindingPluginContext {
   getModuleInfo(moduleId: string): BindingModuleInfo | null
   getModuleIds(): Array<string>
   addWatchFile(file: string): void
+  /**
+   * `experimental.incrementalBuildCache`: the `meta` JSON kept for a module the scan reused, `""`
+   * when there is none to restore, `null` while the module's task hasn't decided.
+   */
+  getReusedModuleMeta(moduleId: string): string | null
+  /** `experimental.incrementalBuildCache`: the `meta` JSON of modules, to keep in their records. */
+  setModuleMetaForCache(ids: Array<string>, metas: Array<string>): void
 }
 
 export declare class BindingRenderedChunk {
