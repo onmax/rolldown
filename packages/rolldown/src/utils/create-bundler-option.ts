@@ -5,6 +5,7 @@ import { LOG_LEVEL_INFO } from '../log/logging';
 import type { InputOptions } from '../options/input-options';
 import type { OutputOptions } from '../options/output-options';
 import { PluginContextData } from '../plugin/plugin-context-data';
+import { buildCacheMetaPlugin } from './build-cache-meta';
 import { PluginDriver } from '../plugin/plugin-driver';
 import { getObjectPlugins } from '../plugin/plugin-driver';
 import { bindingifyInputOptions } from './bindingify-input-options';
@@ -115,6 +116,10 @@ export async function createBundlerOptions(
       normalizedInputPlugins,
       normalizedOutputPlugins,
     );
+    if (inputOptions.experimental?.buildCache) {
+      pluginContextData.buildCache = true;
+      plugins.push(buildCacheMetaPlugin(pluginContextData));
+    }
 
     // Convert `InputOptions` to `BindingInputOptions`
     const bindingInputOptions = bindingifyInputOptions(

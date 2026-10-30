@@ -332,6 +332,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
         self.cache,
         fetch_mode.is_full(),
         None,
+        None,
       )?;
 
       let module_loader_output = module_loader.fetch_modules(fetch_mode).await?;
@@ -668,6 +669,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       Arc::clone(&self.plugin_driver),
       self.cache,
       fetch_mode.is_full(),
+      None,
       None,
     )?;
 

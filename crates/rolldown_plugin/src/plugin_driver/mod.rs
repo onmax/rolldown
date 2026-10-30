@@ -18,7 +18,7 @@ use rolldown_common::{
   ModuleId, ModuleIdx, ModuleInfo, ModuleLoaderMsg, PluginIdx, SharedFileEmitter,
   SharedModuleInfoDashMap, WatchPath,
 };
-use rolldown_utils::dashmap::FxDashSet;
+use rolldown_utils::dashmap::{FxDashMap, FxDashSet};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -31,6 +31,27 @@ use crate::{
 
 pub type SharedPluginDriver = Arc<PluginDriver>;
 
+tokio::task_local! {
+  /// `experimental.buildCache`: the module whose task is running, so the files native hooks emit
+  /// or watch meanwhile (in its `load` and `transform`, and while its imports are resolved) count
+  /// as its own. JS hooks run on another thread and report their module themselves.
+  pub static HOOK_MODULE: ArcStr;
+}
+
+/// The module [`HOOK_MODULE`] names, if the caller runs inside a module's task.
+pub fn hook_module() -> Option<ArcStr> {
+  HOOK_MODULE.try_with(Clone::clone).ok()
+}
+
+/// `experimental.buildCache`: one `PluginContext::resolve` made for a module's hooks (`resolved`
+/// is `None` when it failed).
+#[derive(Debug, Clone)]
+pub struct HookResolution {
+  pub importer: Option<ArcStr>,
+  pub specifier: ArcStr,
+  pub resolved: Option<rolldown_common::ResolvedId>,
+}
+
 pub struct PluginDriver {
   plugins: IndexPluginable,
   contexts: IndexPluginContext,
@@ -42,6 +63,23 @@ pub struct PluginDriver {
   pub module_infos: SharedModuleInfoDashMap,
   /// Module dependencies tracked during load/transform hooks for HMR invalidation
   pub transform_dependencies: Arc<DashMap<ModuleIdx, Arc<FxDashSet<WatchPath>>>>,
+  /// `experimental.buildCache`: modules whose results are not kept, since reusing them would
+  /// change the output: their hooks (`load`, `transform`, or the resolution of their imports)
+  /// emitted a file or a chunk, or did something else a reused entry can't replay.
+  pub uncacheable_modules: FxDashSet<ArcStr>,
+  /// `experimental.buildCache`: files a hook watched on behalf of a module outside its `load` and
+  /// `transform` (the resolution of its imports), kept with the module's entry.
+  pub module_hook_dependencies: FxDashMap<ArcStr, FxDashSet<String>>,
+  /// `experimental.buildCache`: what `PluginContext::resolve` resolved for a module's hooks, whose
+  /// results may depend on it; the module's entry depends on what decides those resolutions.
+  pub module_hook_resolutions: FxDashMap<ArcStr, Vec<HookResolution>>,
+  /// `experimental.buildCache`: the JS module options (JSON) kept in the entry of each module
+  /// the scan reused (`{}` for none), `""` for a module it processed. Absent until the module's
+  /// task decides.
+  pub reused_module_meta: FxDashMap<ArcStr, ArcStr>,
+  /// `experimental.buildCache`: the `meta` (JSON, `""` for none) of the modules the JS
+  /// side knows, handed over at the end of the scan, to be kept in the entries this build writes.
+  pub module_meta_for_cache: FxDashMap<ArcStr, ArcStr>,
   context_load_completion_manager: ContextLoadCompletionManager,
   pub(crate) tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModuleLoaderMsg>>>>,
   /// Outlives the `Bundle` through `BundleHandle`, which is how the binding reads them
@@ -57,6 +95,11 @@ impl PluginDriver {
     // by BundleFactory which manages its lifecycle (reset on full builds only)
     self.context_load_completion_manager.clear();
     self.file_emitter.clear();
+    self.reused_module_meta.clear();
+    self.module_meta_for_cache.clear();
+    self.uncacheable_modules.clear();
+    self.module_hook_dependencies.clear();
+    self.module_hook_resolutions.clear();
   }
 
   pub fn set_module_info(&self, module_id: &ModuleId, module_info: Arc<ModuleInfo>) {
@@ -97,6 +140,26 @@ impl PluginDriver {
 
   pub fn plugins(&self) -> &IndexPluginable {
     &self.plugins
+  }
+
+  /// See `uncacheable_modules`.
+  pub fn mark_uncacheable(&self, module_id: &str) {
+    if !self.uncacheable_modules.contains(module_id) {
+      self.uncacheable_modules.insert(module_id.into());
+    }
+  }
+
+  /// `file`: absolute and normalized, as in `watch_files`.
+  pub fn add_module_hook_resolution(&self, module_id: &str, resolution: HookResolution) {
+    self.module_hook_resolutions.entry(module_id.into()).or_default().push(resolution);
+  }
+
+  pub fn add_module_hook_dependency(&self, module_id: &str, file: String) {
+    if let Some(deps) = self.module_hook_dependencies.get(module_id) {
+      deps.insert(file);
+      return;
+    }
+    self.module_hook_dependencies.entry(module_id.into()).or_default().insert(file);
   }
 
   pub fn add_transform_dependency(&self, module_idx: ModuleIdx, dependency: WatchPath) {

@@ -11,6 +11,7 @@ import type { LogHandler } from '../log/log-handler';
 import { NormalizedInputOptionsImpl } from '../options/normalized-input-options';
 import { NormalizedOutputOptionsImpl } from '../options/normalized-output-options';
 import type { ModuleInfo } from '../types/module-info';
+import type { KeptModuleOptions } from '../utils/build-cache-meta';
 import { transformModuleInfo } from '../utils/transform-module-info';
 import {
   createOutputBundleCache,
@@ -60,6 +61,14 @@ export class PluginContextData {
   renderedChunkMeta: RenderedChunkMeta | null = null;
   normalizedInputOptions: NormalizedInputOptions | null = null;
   normalizedOutputOptions: NormalizedOutputOptions | null = null;
+  /**
+   * `experimental.buildCache` is on: a reused module's `meta` comes from its entry.
+   * `bindingContext` is any plugin context of the current build (they share one plugin driver),
+   * for asking Rust; `keptMetaChecked` holds the ids already asked.
+   */
+  buildCache = false;
+  bindingContext: BindingPluginContext | null = null;
+  private keptMetaChecked = new Set<string>();
 
   constructor(
     private onLog: LogHandler,
@@ -72,7 +81,8 @@ export class PluginContextData {
   }
 
   updateModuleOption(id: string, option: ModuleOptions): ModuleOptions {
-    const existing = this.moduleOptionMap.get(id);
+    // A reused module's kept `meta` goes under what is written once its task decided.
+    const existing = this.buildCache ? this.getModuleOption(id) : this.moduleOptionMap.get(id);
     if (existing) {
       if (option.moduleSideEffects != null) {
         existing.moduleSideEffects = option.moduleSideEffects;
@@ -91,16 +101,39 @@ export class PluginContextData {
   }
 
   getModuleOption(id: string): ModuleOptions {
-    const option = this.moduleOptionMap.get(id);
+    let option = this.moduleOptionMap.get(id);
     if (!option) {
-      const raw: ModuleOptions = {
+      option = {
         moduleSideEffects: null,
         meta: {},
       };
-      this.moduleOptionMap.set(id, raw);
-      return raw;
+      this.moduleOptionMap.set(id, option);
     }
+    if (this.buildCache) this.restoreKeptMeta(id, option);
     return option;
+  }
+
+  /**
+   * Restores the options kept in a reused module's entry (see `build-cache-meta.ts`). They are
+   * what the module ended the last build with, so they replace what `resolveId` set before the
+   * module's task decided (the same hooks ran then too), keys it removed staying removed, and are
+   * overwritten by everything written after. `meta` keeps its identity.
+   */
+  private restoreKeptMeta(id: string, option: ModuleOptions): void {
+    if (this.keptMetaChecked.has(id) || !this.bindingContext) return;
+    const kept = this.bindingContext.getReusedModuleMeta(id);
+    // The module's task hasn't decided yet; ask again on the next read.
+    if (kept == null) return;
+    this.keptMetaChecked.add(id);
+    // Not reused: its hooks ran and set the options.
+    if (!kept) return;
+    const { meta = {}, moduleSideEffects = null } = JSON.parse(kept) as KeptModuleOptions;
+    option.meta ??= {};
+    for (const key of Reflect.ownKeys(option.meta)) {
+      delete (option.meta as Record<PropertyKey, unknown>)[key];
+    }
+    Object.assign(option.meta, meta);
+    option.moduleSideEffects = moduleSideEffects;
   }
 
   getModuleInfo(id: string, context: BindingPluginContext): ModuleInfo | null {
@@ -181,5 +214,7 @@ export class PluginContextData {
     // Watch mode reuses this object across rebuilds; entries hold the previous build's chunk data.
     this.outputCodeCache?.clear();
     this.outputBundleCache = createOutputBundleCache();
+    this.bindingContext = null;
+    this.keptMetaChecked.clear();
   }
 }

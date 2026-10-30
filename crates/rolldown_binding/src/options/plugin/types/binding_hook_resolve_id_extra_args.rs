@@ -18,4 +18,7 @@ pub struct BindingHookResolveIdExtraArgs {
     ts_type = "'import-statement' | 'dynamic-import' | 'require-call' | 'import-rule' | 'url-token' | 'new-url' | 'hot-accept'"
   )]
   pub kind: String,
+  /// `experimental.buildCache`: the module this resolution works for, whose entry gets what the
+  /// hook emits or watches (a reused entry skips the hook).
+  pub cache_module: Option<String>,
 }

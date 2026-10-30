@@ -19,6 +19,15 @@ export class LoadPluginContextImpl extends PluginContextImpl {
     watchMode: boolean,
   ) {
     super(outputOptions, context, plugin, data, onLog, logLevelOption, watchMode, moduleId);
+    if (data.buildCache) {
+      // `experimental.buildCache`: a module whose `load` emitted a file isn't kept.
+      this.cacheModule = moduleId;
+      const emitFile = this.emitFile;
+      this.emitFile = (file) => {
+        context.markModuleUncacheable(moduleId);
+        return emitFile(file);
+      };
+    }
   }
 
   public addWatchFile(id: string): void {

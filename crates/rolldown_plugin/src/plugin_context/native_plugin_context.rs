@@ -56,6 +56,14 @@ impl NativePluginContextImpl {
     side_effects: Option<HookSideEffects>,
     module_def_format: ModuleDefFormat,
   ) -> anyhow::Result<()> {
+    // `experimental.buildCache`: a result built from another module depends on more than the
+    // calling module's entry tracks.
+    if self.options.experimental.build_cache.is_some()
+      && let (Some(module), Some(plugin_driver)) =
+        (crate::hook_module(), self.plugin_driver.upgrade())
+    {
+      plugin_driver.mark_uncacheable(&module);
+    }
     // Clone out the sender under the lock, then drop the lock before awaiting.
     let sender = {
       let guard = self.tx.lock().ok().context("Failed to acquire PluginDriver tx lock")?.clone();
@@ -125,7 +133,7 @@ impl NativePluginContextImpl {
     // the bundle span (which is a child of the session span), we ensure that both
     // CONTEXT_session_id and CONTEXT_bundle_id are inherited automatically.
     // The plugin contexts are recreated at the start of each write/generate with the new bundle span.
-    async {
+    let resolve = async {
       resolve_id_check_external(
         &self.resolver,
         &plugin_driver,
@@ -140,11 +148,45 @@ impl NativePluginContextImpl {
       )
       .await
     }
-    .instrument(self.manual_resolve_span.clone())
-    .await
+    .instrument(self.manual_resolve_span.clone());
+    if self.options.experimental.build_cache.is_none() {
+      return resolve.await;
+    }
+    // `experimental.buildCache`: what hooks emit or watch while resolving belongs to the module the
+    // caller works for (the binding opens its scope for `this.resolve` from JS), else to the
+    // importer; and the resolution itself is one of that module's dependencies, since its hooks
+    // may use the result.
+    let module = crate::hook_module().or_else(|| importer.map(ArcStr::from));
+    let result = match &module {
+      Some(module) if crate::hook_module().is_none() => {
+        crate::HOOK_MODULE.scope(module.clone(), resolve).await
+      }
+      _ => resolve.await,
+    };
+    if let Some(module) = module {
+      plugin_driver.add_module_hook_resolution(
+        &module,
+        crate::HookResolution {
+          importer: importer.map(ArcStr::from),
+          specifier: specifier.into(),
+          resolved: result.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned(),
+        },
+      );
+    }
+    result
+  }
+
+  /// See `PluginDriver::uncacheable_modules`.
+  fn note_emitted_file(&self) {
+    if let (Some(module), Some(plugin_driver)) =
+      (crate::hook_module(), self.plugin_driver.upgrade())
+    {
+      plugin_driver.mark_uncacheable(&module);
+    }
   }
 
   pub fn emit_chunk(&self, chunk: rolldown_common::EmittedChunk) -> anyhow::Result<ArcStr> {
+    self.note_emitted_file();
     self.file_emitter.emit_chunk(Arc::new(chunk))
   }
 
@@ -169,6 +211,7 @@ impl NativePluginContextImpl {
       self.options.sanitize_filename.value(file.name_for_sanitize(), fn_sanitized_file_name)
     });
 
+    self.note_emitted_file();
     self.file_emitter.emit_file(file, asset_filename_template, sanitized_file_name)
   }
 
@@ -178,6 +221,7 @@ impl NativePluginContextImpl {
   ) -> anyhow::Result<ArcStr> {
     let asset_filename = self.options.asset_filename_with_file(&file).await?;
     let sanitized_file_name = self.options.sanitize_file_name_with_file(&file).await?;
+    self.note_emitted_file();
     self.file_emitter.emit_file(file, asset_filename, sanitized_file_name)
   }
 
@@ -197,13 +241,52 @@ impl NativePluginContextImpl {
     self.module_infos.iter().map(|v| v.key().clone()).collect()
   }
 
+  /// See `PluginDriver::reused_module_meta`: `None` while the module's task hasn't decided,
+  /// `""` when the module wasn't reused.
+  pub fn reused_module_meta(&self, module_id: &str) -> Option<ArcStr> {
+    self.plugin_driver.upgrade()?.reused_module_meta.get(module_id).map(|v| v.value().clone())
+  }
+
+  /// See `PluginDriver::module_meta_for_cache`.
+  pub fn set_module_meta_for_cache(&self, entries: impl IntoIterator<Item = (ArcStr, ArcStr)>) {
+    if let Some(plugin_driver) = self.plugin_driver.upgrade() {
+      for (id, meta) in entries {
+        plugin_driver.module_meta_for_cache.insert(id, meta);
+      }
+    }
+  }
+
   pub fn cwd(&self) -> &PathBuf {
     self.resolver.cwd()
   }
 
   /// The path is resolved against `cwd`, so the watch files are absolute and normalized.
   pub fn add_watch_file(&self, file: &str) {
-    self.watch_files.insert(WatchPath::new(file, &self.options.cwd).to_string().into());
+    let path = WatchPath::new(file, &self.options.cwd).to_string();
+    if let (Some(module), Some(plugin_driver)) =
+      (crate::hook_module(), self.plugin_driver.upgrade())
+    {
+      plugin_driver.add_module_hook_dependency(&module, path.clone());
+    }
+    self.watch_files.insert(path.into());
+  }
+
+  /// `experimental.buildCache`: see `PluginDriver::uncacheable_modules`. For JS hooks, which run
+  /// outside the module's task; native ones are seen through `HOOK_MODULE`.
+  pub fn mark_module_uncacheable(&self, module_id: &str) {
+    if let Some(plugin_driver) = self.plugin_driver.upgrade() {
+      plugin_driver.mark_uncacheable(module_id);
+    }
+  }
+
+  /// `experimental.buildCache`: `addWatchFile` from a JS hook working for `module_id`, which runs
+  /// outside the module's task; also watches `file` as `add_watch_file` does.
+  pub fn add_module_watch_file(&self, module_id: &str, file: &str) {
+    let path = WatchPath::new(file, &self.options.cwd).to_string();
+    if let Some(plugin_driver) = self.plugin_driver.upgrade() {
+      plugin_driver.add_module_hook_dependency(module_id, path.clone());
+    }
+    self.watch_files.insert(path.into());
   }
 
   fn log(&self, level: LogLevel, log: LogWithoutPlugin) {

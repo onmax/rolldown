@@ -74,12 +74,82 @@ hooks plus the native resolver).
   cached code is deterministic, so the import records of a warm build are
   identical to the cold build's and a plain array lines up with them. A length
   mismatch (corrupt entry) falls back to fresh resolution.
-- **Validate cached resolutions by stat-ing dep files on hits.** A deleted or
-  moved dependency turns the entry into a miss, so the importer re-resolves
-  and fails (or externalizes) exactly like a cold build. Newly added files
-  that would shadow an old resolution are NOT detected; that class of change
-  is folded into `key` (documented limitation, same as webpack's
-  `unsafeCache`).
+- **An entry lists the files its result depends on, with their content
+  hashes, and is used only while they all match.** The module's own file,
+  every path a hook passed to `this.addWatchFile` for it (in `load` and
+  `transform`, or while its imports were resolved; a directory counts by its
+  entry names), the tsconfig that governs it by the config it resolves to
+  (`extends` and references included, paths made relative so a checkout
+  elsewhere hashes the same) and the directories up to it by their
+  `tsconfig.json` entries, and the `package.json` that governs the module
+  and each local file its imports resolve to, with the directories up to it
+  by their `package.json` entries, so that one added closer starts a new
+  package scope (`sideEffects` and `type` are kept with each resolution).
+  What a hook watches through `this.resolve` belongs to the module whose
+  hook called it, with or without an importer, and what `this.resolve`
+  resolved counts like one of the module's imports (below), since the hook
+  may use the result. A hook that
+  reads a file it declares is then safe to cache, which is the common case
+  for framework compilers (Vue SFC sub-blocks, component registries,
+  generated types).
+- **Validate cached resolutions by directory entries, not by stat-ing the
+  resolved files.** For each relative import the entry records the entry
+  names of the directory the import points into that start with the
+  import's last segment without its extension (`./dep.js` → `dep*`, as an
+  extension alias may find `dep.ts`), and for each resolved file the names
+  next to it that start with its stem. Names mark directories, so a file
+  replaced by a directory of the same name is seen. A deleted or moved dependency
+  changes these names, and so does a new file that would win the resolution
+  (`dep.js` next to `dep/index.js`, `Foo.ts` next to `Foo.vue`), which a
+  stat of the old target can't see. A symlink counts with where its chain
+  finally leads, and a directory reached through a symlink with where it
+  really is, so pointing a symlink, or one further along its chain,
+  elsewhere changes them too. A bare import also depends on the names at
+  every candidate the governing tsconfig's `paths` and `baseUrl` give it,
+  existing or not, and on the `index` and `package.json` names inside it:
+  resolution tries them before `node_modules`, so a file or a directory
+  main appearing at one wins.
+- **Ids of one file share their dependencies.** `X.vue?vue&type=script` and
+  `X.vue?vue&type=style&index=0` are built from state a plugin made while
+  processing `X.vue`, so every entry of a file lists the dependencies of all
+  of its ids. Ids with a query are keyed by the file behind them, without
+  the query.
+- **Module `meta` and `moduleSideEffects` are kept as the build left them**,
+  as Rollup's `cache` keeps `meta`. JS plugins' options for each module are
+  handed to Rust after every other `buildEnd` and stored in the module's
+  entry; a hit restores them before any later hook reads them, replacing
+  what `resolveId` set again (keys a hook removed stay removed).
+  `moduleParsed` and `buildEnd` run on hits too and see their own changes of
+  the build before, so they should set values rather than add to them (a
+  plugin can cache work in `meta` this way). A module whose `meta` JSON
+  would not bring back the same (`undefined`, functions, `Date`, `Map`,
+  class instances, symbol or accessor properties, shared or cyclic
+  objects, ...) is not cached, nor are the other ids of its file.
+- **Modules whose hooks do what a hit can't replay are not cached**, nor are
+  the other ids of their file: emitting a file or a chunk (a hit would drop
+  it), `this.load` of another module from a JS or native hook (the result
+  depends on that module), and resolving an import to an external module
+  with `meta` (an external has no entry to bring it back; checked when the
+  entries are written, so it holds however the module became external); any
+  JS options count, `moduleSideEffects` too, which Vite sets on SSR
+  externals: measured on a Nuxt app, 44 of 1,205 SSR modules, under 0.1 s). That covers `load` (Rolldown's own asset
+  module types included), `transform`, the resolution of the module's
+  imports (`builtin:copy-module`, a `resolveId` that emits), and what
+  resolvers do for `this.resolve` from those hooks. Native hooks are seen
+  through a task-local naming the module whose task runs, only set while
+  the cache is on; JS hooks report the module themselves.
+- **Entries are written when the build succeeds**, in parallel, after the
+  output is written and before the build returns: the dependency union and
+  `meta` are only known then, the scan never waits on a write, and a failed
+  build writes nothing. An entry already on disk as it would be written is
+  not rewritten. Writing is 20-110 ms per environment in the Nuxt apps we
+  measured (5-12k modules). Each write goes to a temp file of its own,
+  created exclusively, and is renamed into place; an entry ends with a
+  checksum of the rest, so a cut or mixed file reads as a miss.
+- **`build-deps.json` lists every file the build depended on**: the
+  dependencies of all entries, every watched file, and the files of modules
+  that were not cached. A tool that reuses a whole build's output (skips the
+  build) checks these.
 - **Serialize the full `ResolvedId`, including `package.json` data.** Side
   effects derived from `package.json` `sideEffects` globs are evaluated in the
   dependency's own task via `resolved_id.package_json`, so dropping it would
@@ -111,15 +181,28 @@ hooks plus the native resolver).
 
 ## Known limitations
 
-- Hook side channels are not replayed on hits: `this.emitFile`,
-  `this.addWatchFile` and custom module meta written during `load` or
-  `transform` are lost for cached modules. Plugins relying on those must
-  currently not be used with the cache enabled. (The module's own watch-file
-  registration is preserved; it does not depend on hooks.)
-- Resolution inputs that live outside module files (lockfile changes that
-  move a package, `tsconfig.json` path mappings, new files shadowing an old
-  resolution) are invisible to the content-based key. Callers fold them into
-  `key`.
+- Files hooks read without `this.addWatchFile` are invisible. Callers fold
+  them into `key`, or list them in `invalidate`, which only matches files
+  an entry lists as a dependency (to re-run a module because of a file it
+  doesn't list, list the module's own file). Plugin options and Rolldown's
+  `resolve` options are not in the salt either: they belong in `key`.
+- Hooks that change other modules' `meta` or plugin state while a module is
+  processed lose those changes when the module is reused, like any other
+  side effect of a skipped hook. A hook that reads another module through
+  `this.getModuleInfo` (its code, its imports) has the same problem;
+  `this.load` makes the caller uncacheable, `getModuleInfo` doesn't.
+  Vite's `vite:build-html` calls `this.load` on an HTML entry's scripts to
+  set their `moduleSideEffects`, so `index.html` is never reused (measured:
+  ~0.2 s more per build of a plain Vite app with one HTML entry).
+- `compilerOptions.rootDirs` candidates of relative imports are not
+  tracked. The tracked candidates are a superset worked out from the
+  specifier, not the resolver's own list of what it tried
+  (`oxc_resolver`'s missing dependencies would be exact).
+- Inherited from #10159: a `load` or `transform` hook that sets
+  `moduleSideEffects` to the value resolution gave stores no override, so
+  if resolution later gives another value, the hit takes it.
+- Installed packages are not hashed (`node_modules` paths are left out of
+  the directory dependencies); callers fold the lockfile into `key`.
 - Incompatible with `experimental.nativeMagicString` + sourcemaps: that path
   generates transform sourcemaps on a side channel outside the module task, so
   the cache silently disables itself there.

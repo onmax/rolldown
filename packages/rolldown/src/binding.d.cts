@@ -1841,6 +1841,23 @@ export declare class BindingPluginContext {
   getModuleInfo(moduleId: string): BindingModuleInfo | null
   getModuleIds(): Array<string>
   addWatchFile(file: string): void
+  /**
+   * `experimental.buildCache`: a JS hook working for `module_id` did something a reused entry
+   * can't replay (emitted a file, loaded another module, ...), so the module isn't kept.
+   */
+  markModuleUncacheable(moduleId: string): void
+  /**
+   * `experimental.buildCache`: `addWatchFile` from a hook working for `module_id` outside its
+   * `load` and `transform` (resolving one of its imports); the module's entry depends on `file`.
+   */
+  addModuleWatchFile(moduleId: string, file: string): void
+  /**
+   * `experimental.buildCache`: the module options JSON kept for a module the scan reused, `""`
+   * when it wasn't reused, `null` while the module's task hasn't decided.
+   */
+  getReusedModuleMeta(moduleId: string): string | null
+  /** `experimental.buildCache`: the `meta` JSON of modules, to keep in their records. */
+  setModuleMetaForCache(ids: Array<string>, metas: Array<string>): void
 }
 
 export declare class BindingRenderedChunk {
@@ -1969,6 +1986,7 @@ export declare enum BindingAttachDebugInfo {
 export interface BindingBuildCacheOptions {
   dir?: string
   key?: string
+  invalidate?: Array<string>
 }
 
 export interface BindingBuiltinPlugin {
@@ -2428,6 +2446,11 @@ export interface BindingHookResolveIdExtraArgs {
    * - `hot-accept`: `import.meta.hot.accept('./lib.js', () => {})`
    */
   kind: 'import-statement' | 'dynamic-import' | 'require-call' | 'import-rule' | 'url-token' | 'new-url' | 'hot-accept'
+  /**
+   * `experimental.buildCache`: the module this resolution works for, whose entry gets what the
+   * hook emits or watches (a reused entry skips the hook).
+   */
+  cacheModule?: string
 }
 
 export interface BindingHookResolveIdOutput {
@@ -2757,6 +2780,11 @@ export interface BindingPluginContextResolveOptions {
   skipSelf?: boolean
   custom?: number
   vitePluginCustom?: BindingVitePluginCustom
+  /**
+   * `experimental.buildCache`: the module the calling hook works on, whose entry gets what hooks
+   * emit or watch while resolving (a reused entry skips the calling hook).
+   */
+  cacheModule?: string
 }
 
 export interface BindingPluginHookMeta {

@@ -52,11 +52,12 @@ impl TryFrom<BindingExperimentalOptions> for rolldown_common::ExperimentalOption
 pub struct BindingBuildCacheOptions {
   pub dir: Option<String>,
   pub key: Option<String>,
+  pub invalidate: Option<Vec<String>>,
 }
 
 impl From<BindingBuildCacheOptions> for rolldown_common::BuildCacheOptions {
   fn from(value: BindingBuildCacheOptions) -> Self {
-    Self { dir: value.dir, key: value.key }
+    Self { dir: value.dir, key: value.key, invalidate: value.invalidate }
   }
 }
 

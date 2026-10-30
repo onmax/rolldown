@@ -56,14 +56,14 @@ export function bindingifyResolveId(
 ): PluginHookWithBindingExt<BindingPluginOptions['resolveId'], BindingHookFilter | undefined> {
   const hook = args.plugin.resolveId as unknown as PluginHooks['resolveId'];
   return bindingifyHook(hook, ({ handler, options }) => ({
-    plugin: async (ctx, specifier, importer, extraOptions) => {
+    plugin: async (ctx, specifier, importer, { cacheModule, ...extraOptions }) => {
       const contextResolveOptions =
         extraOptions.custom != null
           ? args.pluginContextData.getSavedResolveOptions(extraOptions.custom)
           : undefined;
 
       const ret = await handler.call(
-        createPluginContext(args, ctx),
+        createPluginContext(args, ctx, cacheModule ?? undefined),
         specifier,
         importer ?? undefined,
         {
@@ -110,7 +110,7 @@ export function bindingifyResolveDynamicImport(
   return bindingifyHook(args.plugin.resolveDynamicImport, ({ handler }) => ({
     plugin: async (ctx, specifier, importer) => {
       const ret = await handler.call(
-        createPluginContext(args, ctx),
+        createPluginContext(args, ctx, importer ?? undefined),
         specifier,
         importer ?? undefined,
       );

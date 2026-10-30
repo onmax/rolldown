@@ -683,18 +683,31 @@ export interface InputOptions {
      *
      * The cache key covers the rolldown version, platform, the ordered
      * plugin names, each module's id and file content, plus the `key`
-     * option. Plugin configuration or implementation changes and resolution
-     * inputs outside module files (lockfile, `tsconfig.json` paths, newly
-     * added files that shadow a previous resolution) are NOT detected
-     * automatically: fold anything that affects resolve/load/transform
-     * output (e.g. a hash of your resolved config and lockfile) into `key`.
+     * option. An entry is used only while the files it depends on are
+     * unchanged: the module's file, files the hooks passed to
+     * `this.addWatchFile` (also while resolving its imports), its tsconfig
+     * with what it `extends`, the `package.json` that governs it and each
+     * local file it imports (and where a closer one could appear), and the
+     * directory entries and symlinks that decide what its imports resolve to
+     * (a new `dep.js` next to `dep/index.js`, a file at a tsconfig `paths`
+     * target).
+     * Plugin and `resolve` option changes, plugin implementation changes,
+     * installed packages and files the hooks read without
+     * `this.addWatchFile` are NOT detected: fold them into `key` (e.g. a hash
+     * of your resolved config and lockfile), or list files to treat as
+     * changed in `invalidate`.
      *
-     * Hooks are assumed to be deterministic functions of the module's id and
-     * content. Side channels (`this.emitFile`, `this.addWatchFile`, custom
-     * module meta) are not replayed on cache hits, and the cache is not
-     * applied when `nativeMagicString` is enabled together with sourcemaps.
-     * When no plugin registers a `resolveId`, `load` or `transform` hook the
-     * cache disables itself, since there would be nothing to skip.
+     * Hooks are assumed to be deterministic functions of the module's id,
+     * content and declared dependencies. Module `meta` and `moduleSideEffects`
+     * are kept as the build left them, as Rollup's `cache` keeps `meta`, and
+     * `moduleParsed` runs again on a reused module (modules whose `meta` is
+     * not plain JSON are not cached); modules whose hooks emit a file or call
+     * `this.load` (`load`, `transform`, or while resolving their imports) are
+     * not cached, and the
+     * cache is not applied when `nativeMagicString` is enabled. Entries are
+     * written when the build succeeds. When no plugin registers a
+     * `resolveId`, `load` or `transform` hook the cache disables itself,
+     * since there would be nothing to skip.
      *
      * @default false
      */
@@ -710,6 +723,13 @@ export interface InputOptions {
            * Extra cache invalidation key, hashed into every entry.
            */
           key?: string;
+          /**
+           * Absolute paths of files to treat as changed: an entry that lists
+           * one of them as a dependency is not used. To re-run a module
+           * because of a file its hooks read without `this.addWatchFile`, list
+           * the module's own file.
+           */
+          invalidate?: string[];
         };
     /**
      * Use native Rust implementation of MagicString for source map generation.

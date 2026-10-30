@@ -103,6 +103,7 @@ async fn build(cwd: &Path, cache_dir: &Path, key: Option<&str>) -> anyhow::Resul
         build_cache: Some(BuildCacheOption::Options(BuildCacheOptions {
           dir: Some(cache_dir.to_string_lossy().into_owned()),
           key: key.map(str::to_string),
+          invalidate: None,
         })),
         ..Default::default()
       }),
@@ -209,6 +210,7 @@ async fn cache_disables_itself_without_cacheable_plugin_hooks() {
       build_cache: Some(BuildCacheOption::Options(BuildCacheOptions {
         dir: Some(cache_dir.to_string_lossy().into_owned()),
         key: None,
+        invalidate: None,
       })),
       ..Default::default()
     }),

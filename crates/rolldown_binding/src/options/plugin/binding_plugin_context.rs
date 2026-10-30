@@ -49,18 +49,20 @@ impl BindingPluginContext {
     &self,
     specifier: String,
     importer: Option<String>,
-    extra_options: Option<BindingPluginContextResolveOptions>,
+    mut extra_options: Option<BindingPluginContextResolveOptions>,
   ) -> napi::Result<Option<BindingPluginContextResolvedId>> {
-    let ret = self
-      .inner
-      .resolve(
-        &specifier,
-        importer.as_deref(),
-        extra_options.map(TryInto::try_into).transpose().map_err(napi::Error::from_reason)?,
-      )
-      .await
-      .map_err(|program_err| napi_error::resolve_error(&specifier, program_err))?
-      .ok();
+    let cache_module = extra_options.as_mut().and_then(|options| options.cache_module.take());
+    let resolve = self.inner.resolve(
+      &specifier,
+      importer.as_deref(),
+      extra_options.map(TryInto::try_into).transpose().map_err(napi::Error::from_reason)?,
+    );
+    let ret = match cache_module {
+      Some(module) => rolldown_plugin::HOOK_MODULE.scope(module.into(), resolve).await,
+      None => resolve.await,
+    }
+    .map_err(|program_err| napi_error::resolve_error(&specifier, program_err))?
+    .ok();
 
     Ok(ret.map(|info| BindingPluginContextResolvedId {
       // TODO: should use `&str` instead. (claude code) Attempt failed due to NAPI object field must be String type
@@ -133,6 +135,35 @@ impl BindingPluginContext {
   #[napi]
   pub fn add_watch_file(&self, file: String) {
     self.inner.add_watch_file(&file);
+  }
+
+  /// `experimental.buildCache`: a JS hook working for `module_id` did something a reused entry
+  /// can't replay (emitted a file, loaded another module, ...), so the module isn't kept.
+  #[napi]
+  pub fn mark_module_uncacheable(&self, module_id: String) {
+    self.inner.mark_module_uncacheable(&module_id);
+  }
+
+  /// `experimental.buildCache`: `addWatchFile` from a hook working for `module_id` outside its
+  /// `load` and `transform` (resolving one of its imports); the module's entry depends on `file`.
+  #[napi]
+  pub fn add_module_watch_file(&self, module_id: String, file: String) {
+    self.inner.add_module_watch_file(&module_id, &file);
+  }
+
+  /// `experimental.buildCache`: the module options JSON kept for a module the scan reused, `""`
+  /// when it wasn't reused, `null` while the module's task hasn't decided.
+  #[napi]
+  pub fn get_reused_module_meta(&self, module_id: String) -> Option<String> {
+    self.inner.reused_module_meta(&module_id).map(|meta| meta.to_string())
+  }
+
+  /// `experimental.buildCache`: the `meta` JSON of modules, to keep in their records.
+  #[napi]
+  pub fn set_module_meta_for_cache(&self, ids: Vec<String>, metas: Vec<String>) {
+    self.inner.set_module_meta_for_cache(
+      ids.into_iter().zip(metas).map(|(id, meta)| (id.into(), meta.into())),
+    );
   }
 }
 

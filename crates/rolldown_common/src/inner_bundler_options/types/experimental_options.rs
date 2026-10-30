@@ -80,6 +80,9 @@ pub struct BuildCacheOptions {
   /// fold anything that changes resolve/load/transform output (e.g. a hash of
   /// the resolved config and lockfile) into this key.
   pub key: Option<String>,
+  /// Absolute paths of files to treat as changed, for inputs the hooks read without
+  /// `this.addWatchFile`.
+  pub invalidate: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]

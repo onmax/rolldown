@@ -103,6 +103,21 @@ impl<Fs: FileSystem> Resolver<Fs> {
     self.package_json_cache.clear();
   }
 
+  /// Where a bare `specifier` imported from `file` may be found through the tsconfig governing
+  /// `file`: its `paths` targets, then `baseUrl`, whether they exist or not. Resolution tries them
+  /// before `node_modules`, so a file appearing at one changes what the import resolves to.
+  pub fn tsconfig_candidates(&self, file: &Path, specifier: &str) -> Vec<PathBuf> {
+    let Ok(Some(tsconfig)) = self.import_resolver.find_tsconfig(file) else { return vec![] };
+    let mut candidates = tsconfig.resolve_path_alias_or_base_url(specifier);
+    if let Some(base_url) = &tsconfig.compiler_options.base_url {
+      let candidate = base_url.join(specifier).normalize().into_owned();
+      if !candidates.contains(&candidate) {
+        candidates.push(candidate);
+      }
+    }
+    candidates
+  }
+
   pub fn resolve_tsconfig<T: AsRef<Path>>(
     &self,
     path: &T,

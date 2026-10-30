@@ -178,6 +178,7 @@ impl BundleFactory {
       module_infos,
       transform_dependencies,
     );
+    let build_cache = crate::utils::build_cache::BuildCache::new(&self.options, &plugin_driver);
     let bundle = Bundle {
       fs,
       options: Arc::clone(&self.options),
@@ -187,6 +188,7 @@ impl BundleFactory {
       warnings: std::mem::take(&mut self.warnings),
       bundle_span,
       cache,
+      build_cache,
     };
     self.last_bundle_handle = Some(bundle.context());
     bundle

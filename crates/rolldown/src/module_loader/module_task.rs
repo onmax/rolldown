@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use arcstr::ArcStr;
@@ -24,6 +23,11 @@ use crate::{
 };
 
 use super::{resolve_utils::resolve_dependencies, task_context::TaskContext};
+use crate::utils::build_cache::{
+  BuildCache, CachedModule, CachedResolvedId, CachedSourcemap, Lookup, decode_hook_side_effects,
+  encode_hook_side_effects,
+};
+use oxc_index::IndexVec;
 
 pub struct ModuleTaskOwner {
   source: ArcStr,
@@ -79,7 +83,14 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
 
   #[tracing::instrument(name="NormalModuleTask::run", level = "trace", skip_all, fields(module_id = %self.resolved_id.id))]
   pub async fn run(mut self) {
-    if let Err(errs) = self.run_inner().await {
+    // `experimental.buildCache`: what hooks emit or watch while this task runs belongs to the module.
+    let result = if self.ctx.build_cache.is_some() {
+      let id = self.resolved_id.id.as_arc_str().clone();
+      rolldown_plugin::HOOK_MODULE.scope(id, self.run_inner()).await
+    } else {
+      self.run_inner().await
+    };
+    if let Err(errs) = result {
       self.ctx.plugin_driver.mark_context_load_modules_loaded(self.resolved_id.id.clone());
       self
         .ctx
@@ -89,6 +100,7 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     }
   }
 
+  #[expect(clippy::too_many_lines)] // The build cache's lookup and keep steps wrap the pipeline stages inline.
   async fn run_inner(&mut self) -> BuildResult<()> {
     let id = self.resolved_id.id.clone();
 
@@ -112,46 +124,54 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     let side_effects_from_resolve = hook_side_effects;
     let stable_id = id.stabilize(&self.ctx.options.cwd);
 
-    // Persistent build cache, keyed on the module's on-disk content: a hit
-    // replays the plugin `load`/`transform` pipeline results plus the resolved
-    // dependencies without calling any hook or the resolver; parsing and
-    // scanning re-run natively on the cached code below.
-    // See internal-docs/build-cache/implementation.md.
-    let mut cached_deps = None;
-    let mut cache_write_key = None;
-    let mut cache_hit = None;
-    if let Some(cache) = &self.ctx.build_cache
-      && let Some(disk_source) = self.read_disk_source_for_cache_key().await
-    {
-      let key =
-        cache.cache_key(stable_id.as_arc_str(), self.asserted_module_type.as_ref(), &disk_source);
-      if let Some(hit) = cache.get(&key).await {
-        // Watch registration mirrors the read-from-disk path in `load_source`.
-        self.ctx.plugin_driver.watch_files.insert(id.as_arc_str().clone());
-        sourcemap_chain = hit.sourcemap_chain;
-        if hit.side_effects.is_some() {
-          hook_side_effects = hit.side_effects;
-        }
-        cached_deps = Some(hit.resolved_deps);
-        cache_hit = Some((StrOrBytes::Str(hit.code), hit.module_type));
-      } else {
-        cache_write_key = Some(key);
-      }
-    }
-
-    let (source, module_type) = match cache_hit {
-      Some(source_and_type) => source_and_type,
-      None => {
-        self
-          .load_source(&mut sourcemap_chain, &mut hook_side_effects, self.magic_string_tx.clone())
-          .await?
+    // Persistent build cache: a hit replays the plugin `load`/`transform` pipeline results plus
+    // the resolved dependencies without calling any hook or the resolver; parsing and scanning
+    // re-run natively on the cached code below. See internal-docs/build-cache/implementation.md.
+    let build_cache = self.ctx.build_cache.as_ref();
+    let lookup = build_cache.map_or(Lookup::Bypass, |cache| {
+      cache.lookup(id.as_arc_str(), stable_id.as_arc_str(), self.asserted_module_type.as_ref())
+    });
+    let (key, hit) = match lookup {
+      Lookup::Bypass => (None, None),
+      Lookup::Miss { key } => (Some(key), None),
+      Lookup::Hit { key, module } => {
+        let chain =
+          module.sourcemap_chain.iter().map(CachedSourcemap::decode).collect::<Option<Vec<_>>>();
+        (Some(key), chain.map(|chain| (module, chain)))
       }
     };
+    if build_cache.is_some() {
+      self.ctx.plugin_driver.reused_module_meta.insert(
+        id.as_arc_str().clone(),
+        hit.as_ref().map_or_else(ArcStr::new, |(module, _)| {
+          module.meta.as_deref().map_or_else(|| arcstr::literal!("{}"), ArcStr::from)
+        }),
+      );
+    }
 
-    // Snapshot what a stored entry needs before `source` moves into the view;
-    // only string sources are cacheable, the pipeline never transforms bytes.
-    let code_to_cache = match (&cache_write_key, &source) {
-      (Some(_), StrOrBytes::Str(code)) => Some(code.clone()),
+    let (source, module_type) = if let Some((module, chain)) = &hit {
+      sourcemap_chain.clone_from(chain);
+      if let Some(side_effects) = module.side_effects {
+        hook_side_effects = Some(decode_hook_side_effects(side_effects));
+      }
+      // Watch registration mirrors the read-from-disk path in `load_source`.
+      self.ctx.plugin_driver.watch_files.insert(id.as_arc_str().clone());
+      (StrOrBytes::Str(module.code.clone()), module.module_type())
+    } else {
+      self
+        .load_source(&mut sourcemap_chain, &mut hook_side_effects, self.magic_string_tx.clone())
+        .await?
+    };
+    // Only string sources are cacheable; the pipeline never transforms bytes.
+    let new_entry = match (&hit, build_cache, &key, &source) {
+      (None, Some(cache), Some(_), StrOrBytes::Str(code)) => {
+        // Side effects may already be set by resolution data outside the entry, so only the
+        // load/transform pipeline's own override is kept; keeping the pre-existing value would
+        // replay stale resolution data on later hits.
+        let side_effects_override =
+          if hook_side_effects == side_effects_from_resolve { None } else { hook_side_effects };
+        self.start_entry(cache, code, &module_type, side_effects_override, &sourcemap_chain)
+      }
       _ => None,
     };
 
@@ -184,50 +204,88 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
       )
       .await?;
 
-    let resolved_deps = match cached_deps.take() {
-      // Scanning the cached code deterministically reproduces the import
-      // records the stored resolutions are positionally aligned with; a length
-      // mismatch means a corrupt entry, so fall back to a fresh resolution.
-      Some(deps) if deps.len() == raw_import_records.len() => deps,
-      _ => {
-        let warnings_len_before_resolve = warnings.len();
-        let resolved_deps = resolve_dependencies(
-          &self.resolved_id,
-          &self.ctx.options,
-          &self.ctx.resolver,
-          &self.ctx.plugin_driver,
-          &raw_import_records,
-          ecma_view.source.clone(),
-          &mut warnings,
-        )
-        .await?;
-        if let Some(cache) = &self.ctx.build_cache
-          && let Some(key) = &cache_write_key
-          && let Some(code) = &code_to_cache
-          // Resolution warnings (e.g. unresolved imports treated as external)
-          // would not replay on a hit, so such modules are never stored.
-          && warnings.len() == warnings_len_before_resolve
-        {
-          // Side effects may already be set by resolution data outside the
-          // cache key, so only the load/transform pipeline's own override is
-          // stored; storing the pre-existing value would replay stale
-          // resolution data on later hits.
-          let side_effects_override =
-            if hook_side_effects == side_effects_from_resolve { None } else { hook_side_effects };
-          cache
-            .set(
-              key,
-              code,
-              &module_type,
-              side_effects_override,
-              &ecma_view.sourcemap_chain,
-              &resolved_deps,
-            )
-            .await;
-        }
-        resolved_deps
-      }
+    // Scanning the cached code deterministically reproduces the import records the cached
+    // resolutions are positionally aligned with; a length mismatch means a corrupt entry, so fall
+    // back to a fresh resolution.
+    let cached_deps = hit.as_ref().and_then(|(module, _)| {
+      (module.resolved_deps.len() == raw_import_records.len()).then(|| {
+        module.resolved_deps.iter().map(CachedResolvedId::decode).collect::<IndexVec<_, _>>()
+      })
+    });
+    let hit_deps = cached_deps.is_some();
+    let mut resolution_warned = false;
+    let resolved_deps = if let Some(resolved_deps) = cached_deps {
+      resolved_deps
+    } else {
+      let warnings_len_before_resolve = warnings.len();
+      let resolved_deps = resolve_dependencies(
+        &self.resolved_id,
+        &self.ctx.options,
+        &self.ctx.resolver,
+        &self.ctx.plugin_driver,
+        &raw_import_records,
+        ecma_view.source.clone(),
+        &mut warnings,
+      )
+      .await?;
+      resolution_warned = warnings.len() != warnings_len_before_resolve;
+      resolved_deps
     };
+    if let (Some(cache), Some(key)) = (build_cache, &key) {
+      let resolved = |mut entry: CachedModule| {
+        let file = entry.files[0].0.clone();
+        // Resolution warnings (e.g. unresolved imports treated as external) would not replay on
+        // a hit, so such modules are never cached.
+        if resolution_warned {
+          cache.uncacheable(&file);
+          return;
+        }
+        entry.resolved_deps = resolved_deps.iter().map(CachedResolvedId::encode).collect();
+        let module_file = std::path::Path::new(&file);
+        let hook_resolutions = self
+          .ctx
+          .plugin_driver
+          .module_hook_resolutions
+          .remove(id.as_str())
+          .map(|(_, resolutions)| resolutions)
+          .unwrap_or_default();
+        let resolutions = raw_import_records
+          .iter()
+          .zip(resolved_deps.iter())
+          .map(|(record, dep)| (Some(module_file), record.module_request.as_str(), Some(dep)))
+          .chain(hook_resolutions.iter().map(|r| {
+            let importer = r.importer.as_deref().and_then(BuildCache::file_of);
+            (importer.map(std::path::Path::new), r.specifier.as_str(), r.resolved.as_ref())
+          }));
+        let importer_package_json =
+          self.resolved_id.package_json.as_ref().map(|p| p.realpath().to_path_buf());
+        let dirs = Self::resolution_dirs(
+          module_file,
+          importer_package_json.as_deref(),
+          &self.ctx.options.cwd,
+          resolutions,
+          |importer, specifier| self.ctx.resolver.tsconfig_candidates(importer, specifier),
+        );
+        for dir in dirs {
+          let Some(hash) = cache.hash_file(&dir) else {
+            cache.uncacheable(&file);
+            return;
+          };
+          if !entry.files.iter().any(|(f, _)| *f == dir) {
+            entry.files.push((dir, hash));
+          }
+        }
+        cache.keep(id.as_arc_str().clone(), key, entry, false);
+      };
+      match (hit, new_entry) {
+        (Some((module, _)), _) if hit_deps => {
+          cache.keep(id.as_arc_str().clone(), key, module, true);
+        }
+        (Some((module, _)), _) => resolved(module),
+        (None, Some(entry)) => resolved(entry),
+        (None, None) => {}
+      }
+    }
 
     for (record, info) in raw_import_records.iter().zip(&resolved_deps) {
       match record.kind {
@@ -318,6 +376,142 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     Ok(())
   }
 
+  /// An entry of what the hooks produced for this module, without its resolved dependencies, or
+  /// `None` when it can't be cached.
+  fn start_entry(
+    &self,
+    cache: &BuildCache,
+    code: &str,
+    module_type: &ModuleType,
+    side_effects_override: Option<rolldown_common::side_effects::HookSideEffects>,
+    sourcemap_chain: &[SourcemapChainElement],
+  ) -> Option<CachedModule> {
+    let file = BuildCache::file_of(self.resolved_id.id.as_str())?;
+    let Some(hash) = cache.hash_file(file) else {
+      cache.uncacheable(file);
+      return None;
+    };
+    let mut files = vec![(file.to_string(), hash)];
+    let mut extra: Vec<String> = self
+      .ctx
+      .plugin_driver
+      .transform_dependencies
+      .get(&self.module_idx)
+      .map(|deps| deps.iter().map(|dep| dep.as_path().to_string_lossy().into_owned()).collect())
+      .unwrap_or_default();
+    let tsconfig =
+      self.ctx.options.transform_options.discover_tsconfig_file(std::path::Path::new(file));
+    extra.extend(cache.tsconfig_deps(std::path::Path::new(file), tsconfig.as_deref()));
+    extra.sort_unstable();
+    extra.dedup();
+    for dep in extra {
+      let Some(hash) = cache.hash_file(&dep) else {
+        cache.uncacheable(file);
+        return None;
+      };
+      files.push((dep, hash));
+    }
+    Some(CachedModule {
+      files,
+      code: code.to_string(),
+      module_type: module_type.to_string(),
+      side_effects: side_effects_override.map(encode_hook_side_effects),
+      // Without sourcemaps in the output, the chain is never read.
+      sourcemap_chain: if self.ctx.options.sourcemap.is_some() {
+        sourcemap_chain.iter().map(CachedSourcemap::encode).collect()
+      } else {
+        vec![]
+      },
+      resolved_deps: vec![],
+      meta: None,
+    })
+  }
+
+  /// Directory entries that decide what this module's imports, and what its hooks resolved
+  /// through `PluginContext::resolve`, resolve to, as `BuildCache::entries_dep` paths:
+  /// - for each relative specifier, the entries of the directory it points into named like its
+  ///   last segment without its extension (`./dep.js` → `dep*`, which an extension alias may
+  ///   find as `dep.ts`);
+  /// - for each bare specifier, the same for every candidate the governing tsconfig's `paths` and
+  ///   `baseUrl` give it, and the entries named `index` and `package.json` inside it (a directory
+  ///   there wins once it has them), since resolution tries them before `node_modules`;
+  /// - for each resolved file outside `node_modules`, the entries next to it named like its stem
+  ///   (`Foo.vue` → `Foo*`), and for an `index` file the entries named like its directory
+  ///   (`dep.js` beats `dep/index.js`) and the entries named `package.json` beside it;
+  /// - for that file and the module, the entries named `package.json` of each directory from
+  ///   theirs up to the `package.json` that governs them (to the root when none does), since one
+  ///   appearing closer starts a new package scope, and that `package.json` itself: `exports`,
+  ///   `main` and `imports` decide where imports resolve, and `type` and `sideEffects` are kept
+  ///   with the resolution.
+  ///
+  /// `resolutions`: importer (the cwd for none), specifier and result (`None`: it failed).
+  /// Packages in `node_modules` are covered by the caller's `key` (lockfile).
+  fn resolution_dirs<'a>(
+    module_file: &std::path::Path,
+    module_package_json: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+    resolutions: impl Iterator<Item = (Option<&'a std::path::Path>, &'a str, Option<&'a ResolvedId>)>,
+    tsconfig_candidates: impl Fn(&std::path::Path, &str) -> Vec<std::path::PathBuf>,
+  ) -> Vec<String> {
+    use std::path::Path;
+    fn push_named(deps: &mut Vec<String>, dir: &Path, prefix: &str) {
+      let dep = BuildCache::entries_dep(&dir.to_string_lossy(), prefix);
+      if !dep.contains("/node_modules/") && !deps.contains(&dep) {
+        deps.push(dep);
+      }
+    }
+    fn push(deps: &mut Vec<String>, path: &Path) {
+      if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
+        push_named(deps, dir, &name.to_string_lossy());
+      }
+    }
+    fn push_stem(deps: &mut Vec<String>, path: &Path) {
+      if let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) {
+        push_named(deps, dir, &stem.to_string_lossy());
+      }
+    }
+    fn package_scope(deps: &mut Vec<String>, file: &Path, package_json: Option<&Path>) {
+      let scope = package_json.and_then(Path::parent);
+      for dir in file.ancestors().skip(1) {
+        push(deps, &dir.join("package.json"));
+        if Some(dir) == scope {
+          break;
+        }
+      }
+      if let Some(package_json) = package_json {
+        let package_json = package_json.to_string_lossy();
+        if !package_json.contains("/node_modules/") && !deps.iter().any(|d| *d == package_json) {
+          deps.push(package_json.into_owned());
+        }
+      }
+    }
+    let mut deps: Vec<String> = vec![];
+    package_scope(&mut deps, module_file, module_package_json);
+    for (importer, specifier, resolved) in resolutions {
+      if specifier.starts_with('.') {
+        let base = importer.and_then(Path::parent).unwrap_or(cwd);
+        push_stem(&mut deps, &normalize_path(&base.join(specifier)));
+      } else if !specifier.starts_with(['/', '\0']) {
+        for candidate in tsconfig_candidates(importer.unwrap_or(module_file), specifier) {
+          push_stem(&mut deps, &candidate);
+          push_named(&mut deps, &candidate, "index");
+          push_named(&mut deps, &candidate, "package.json");
+        }
+      }
+      let Some(dep) = resolved else { continue };
+      let Some(file) = BuildCache::file_of(dep.id.as_str()).map(Path::new) else { continue };
+      package_scope(&mut deps, file, dep.package_json.as_ref().map(|p| p.realpath()));
+      let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else { continue };
+      push_named(&mut deps, dir, &stem.to_string_lossy());
+      if stem == "index" {
+        push(&mut deps, dir);
+        push(&mut deps, &dir.join("package.json"));
+      }
+    }
+    deps.sort_unstable();
+    deps
+  }
+
   #[tracing::instrument(level = "debug", skip_all)]
   async fn load_source(
     &self,
@@ -396,27 +590,20 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
     }
     Ok((source, module_type))
   }
+}
 
-  /// Reads the module's raw on-disk content, which keys its build cache
-  /// entry. Only absolute filesystem paths are cacheable: virtual modules,
-  /// data URLs, `rolldown:` ids and unreadable files bypass the cache.
-  async fn read_disk_source_for_cache_key(&self) -> Option<Vec<u8>> {
-    if !Path::new(self.resolved_id.id.as_str()).is_absolute() {
-      return None;
-    }
-    let fs = self.ctx.fs.clone();
-    #[cfg(not(target_family = "wasm"))]
-    {
-      let id = self.resolved_id.id.clone();
-      tokio::runtime::Handle::current()
-        .spawn_blocking(move || fs.read(Path::new(id.as_str())).ok())
-        .await
-        .ok()
-        .flatten()
-    }
-    #[cfg(target_family = "wasm")]
-    {
-      fs.read(Path::new(self.resolved_id.id.as_str())).ok()
+/// `a/./b/../c` → `a/c`, without touching the file system.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+  use std::path::Component;
+  let mut out = std::path::PathBuf::new();
+  for c in path.components() {
+    match c {
+      Component::CurDir => {}
+      Component::ParentDir => {
+        out.pop();
+      }
+      c => out.push(c.as_os_str()),
     }
   }
+  out
 }

@@ -277,6 +277,12 @@ export interface PluginContext extends MinimalPluginContext {
 export class PluginContextImpl extends MinimalPluginContextImpl {
   fs: RolldownFsModule = fsModule;
   getModuleInfo: GetModuleInfo;
+  /**
+   * `experimental.buildCache`: the module the hook works for. A reused entry skips the hook, so
+   * what the hook or the hooks it calls emit or watch belongs to that module's entry.
+   * @internal
+   */
+  cacheModule?: string;
   constructor(
     private outputOptions: OutputOptions,
     private context: BindingPluginContext,
@@ -288,6 +294,7 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
     private currentLoadingModule?: string,
   ) {
     super(onLog, logLevel, plugin.name!, watchMode);
+    data.bindingContext ??= context;
     this.getModuleInfo = (id: string) => this.data.getModuleInfo(id, context);
   }
 
@@ -298,6 +305,8 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
     if (id === this.currentLoadingModule) {
       this.onLog(LOG_LEVEL_WARN, logCycleLoading(this.pluginName, this.currentLoadingModule));
     }
+    // A result built from another module's code or info depends on more than the entry tracks.
+    if (this.cacheModule != null) this.context.markModuleUncacheable(this.cacheModule);
     // resolveDependencies always true at rolldown
     const moduleInfo = this.data.getModuleInfo(id, this.context);
     if (moduleInfo && moduleInfo.code !== null /* module already parsed */) {
@@ -350,6 +359,7 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
       isEntry: options?.isEntry,
       skipSelf: options?.skipSelf,
       vitePluginCustom,
+      cacheModule: this.cacheModule,
     } satisfies Record<keyof BindingPluginContextResolveOptions, unknown>);
     if (receipt != null) {
       this.data.removeSavedResolveOptions(receipt);
@@ -357,6 +367,11 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
 
     if (res == null) return null;
     const info = this.data.getModuleOption(res.id) || ({} as ModuleOptions);
+    // `experimental.buildCache`: an external module has no entry to bring its options back when
+    // the caller's module is reused (`BuildCache::save` checks imports).
+    if (this.cacheModule != null && res.external && Object.keys(info.meta ?? {}).length > 0) {
+      this.context.markModuleUncacheable(this.cacheModule);
+    }
     return {
       ...res,
       external:
@@ -461,11 +476,13 @@ export class PluginContextImpl extends MinimalPluginContextImpl {
   }
 }
 
+/** `cacheModule`: see `PluginContextImpl.cacheModule`. */
 export function createPluginContext(
   args: BindingifyPluginArgs,
   ctx: BindingPluginContext,
+  cacheModule?: string,
 ): PluginContextImpl {
-  return new PluginContextImpl(
+  const context = new PluginContextImpl(
     args.outputOptions,
     ctx,
     args.plugin,
@@ -474,6 +491,16 @@ export function createPluginContext(
     args.logLevel,
     args.watchMode,
   );
+  if (cacheModule != null && args.pluginContextData.buildCache) {
+    context.cacheModule = cacheModule;
+    const emitFile = context.emitFile;
+    context.emitFile = (file) => {
+      ctx.markModuleUncacheable(cacheModule);
+      return emitFile(file);
+    };
+    context.addWatchFile = (id) => ctx.addModuleWatchFile(cacheModule, id);
+  }
+  return context;
 }
 
 function _assert() {

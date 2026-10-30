@@ -82,6 +82,15 @@ export class TransformPluginContextImpl extends PluginContextImpl {
         handler(log);
       };
 
+    if (data.buildCache) {
+      // `experimental.buildCache`: a module whose `transform` emitted a file isn't kept.
+      this.cacheModule = moduleId;
+      const emitFile = this.emitFile;
+      this.emitFile = (file) => {
+        context.markModuleUncacheable(moduleId);
+        return emitFile(file);
+      };
+    }
     this.debug = getLogHandler(this.debug);
     this.warn = getLogHandler(this.warn);
     this.info = getLogHandler(this.info);

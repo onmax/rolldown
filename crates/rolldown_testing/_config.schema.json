@@ -1217,6 +1217,17 @@
             "null"
           ],
           "default": null
+        },
+        "invalidate": {
+          "description": "Absolute paths of files to treat as changed, for inputs the hooks read without\n`this.addWatchFile`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
         }
       },
       "additionalProperties": false

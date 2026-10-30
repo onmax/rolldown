@@ -129,6 +129,7 @@ impl Plugin for JsPlugin {
         .custom
         .get::<JsPluginContextResolveCustomArgId>(&JsPluginContextResolveCustomArgId)
         .copied(),
+      cache_module: rolldown_plugin::hook_module().map(|module| module.to_string()),
     };
 
     let span =

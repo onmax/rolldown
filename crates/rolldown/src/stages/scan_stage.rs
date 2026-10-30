@@ -1,3 +1,4 @@
+use crate::utils::build_cache::BuildCache;
 use std::{sync::Arc, thread};
 
 use arcstr::ArcStr;
@@ -35,6 +36,7 @@ pub struct ScanStage<Fs: FileSystem + Clone + 'static> {
   plugin_driver: SharedPluginDriver,
   fs: Fs,
   resolver: SharedResolver<Fs>,
+  build_cache: Option<Arc<BuildCache>>,
 }
 
 #[derive(Debug)]
@@ -152,7 +154,12 @@ impl<Fs: FileSystem + Clone + 'static> ScanStage<Fs> {
     fs: Fs,
     resolver: SharedResolver<Fs>,
   ) -> Self {
-    Self { options, plugin_driver, fs, resolver }
+    Self { options, plugin_driver, fs, resolver, build_cache: None }
+  }
+
+  pub fn with_build_cache(mut self, build_cache: Option<Arc<BuildCache>>) -> Self {
+    self.build_cache = build_cache;
+    self
   }
 
   #[tracing::instrument(target = "devtool", level = "debug", skip_all)]
@@ -177,6 +184,7 @@ impl<Fs: FileSystem + Clone + 'static> ScanStage<Fs> {
       cache,
       fetch_mode.is_full(),
       tx_clone,
+      self.build_cache.clone(),
     )?;
 
     // For `pluginContext.emitFile` with `type: chunk`, support it at buildStart hook.

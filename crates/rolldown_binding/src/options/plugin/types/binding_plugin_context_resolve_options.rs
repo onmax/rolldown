@@ -26,6 +26,9 @@ pub struct BindingPluginContextResolveOptions {
   pub skip_self: Option<bool>,
   pub custom: Option<u32>,
   pub vite_plugin_custom: Option<BindingVitePluginCustom>,
+  /// `experimental.buildCache`: the module the calling hook works on, whose entry gets what hooks
+  /// emit or watch while resolving (a reused entry skips the calling hook).
+  pub cache_module: Option<String>,
 }
 
 impl TryFrom<BindingPluginContextResolveOptions> for PluginContextResolveOptions {

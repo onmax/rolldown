@@ -64,14 +64,14 @@ impl TransformPluginContext {
 
   /// Add a file or a directory as a watch dependency.
   pub fn add_watch_file(&self, file: &str) {
-    // Skip all operations for virtual modules (starting with \0)
-    // Virtual modules can't be refetched from disk during HMR
+    // Add to global watch files: a virtual module's transform may still read files on disk.
+    self.inner.add_watch_file(file);
+
+    // Skip the HMR dependency for virtual modules (starting with \0):
+    // they can't be refetched from disk during HMR
     if self.id.starts_with('\0') {
       return;
     }
-
-    // Add to global watch files
-    self.inner.add_watch_file(file);
 
     // Add to this module's transform dependencies
     if let crate::PluginContext::Native(ctx) = &self.inner {

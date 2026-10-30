@@ -42,7 +42,7 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true }
 string_wizard = { workspace = true }
 sugar_path = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true, features = ["valuable"] }
 typedmap = { workspace = true }
 

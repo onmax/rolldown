@@ -11,6 +11,7 @@ use super::super::{
   types::{bundle_output::BundleOutput, scan_stage_cache::ScanStageCache},
   utils::fs_utils::clean_dir,
 };
+use crate::utils::build_cache::BuildCache;
 use anyhow::Context;
 use arcstr::ArcStr;
 use rolldown_common::{GetLocalDbMut, Module, ScanMode, SharedFileEmitter, SymbolRefDb};
@@ -37,6 +38,8 @@ pub struct Bundle<Fs: FileSystem + Clone + 'static = OsFileSystem> {
   pub(crate) warnings: Vec<BuildDiagnostic>,
   pub(crate) cache: ScanStageCache,
   pub(crate) bundle_span: tracing::Span,
+  /// Set by `experimental.buildCache`.
+  pub(crate) build_cache: Option<Arc<BuildCache>>,
 }
 
 impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
@@ -115,6 +118,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
       self.fs.clone(),
       Arc::clone(&self.resolver),
     )
+    .with_build_cache(self.build_cache.clone())
     .scan(scan_mode, &mut self.cache)
     .await
     {
@@ -178,7 +182,8 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     scan_stage_output: NormalizedScanStageOutput,
   ) -> BuildResult<BundleOutput> {
     let result = self.bundle_write_impl(scan_stage_output).await;
-    self.invalidate_js_side_cache(result).await
+    let result = self.invalidate_js_side_cache(result).await;
+    self.save_build_cache(result)
   }
 
   async fn bundle_write_impl(
@@ -258,7 +263,26 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     scan_stage_output: NormalizedScanStageOutput,
   ) -> BuildResult<BundleOutput> {
     let result = self.bundle_up(scan_stage_output, false).await;
-    self.invalidate_js_side_cache(result).await
+    let result = self.invalidate_js_side_cache(result).await;
+    self.save_build_cache(result)
+  }
+
+  /// Only a successful build writes cache entries. A failed write is a warning: the cache never
+  /// fails a build.
+  fn save_build_cache(&self, result: BuildResult<BundleOutput>) -> BuildResult<BundleOutput> {
+    let mut output = result?;
+    if let Some(cache) = &self.build_cache
+      && let Err(err) = cache.save(&self.plugin_driver)
+    {
+      output.warnings.push(
+        BuildDiagnostic::unhandleable_error(anyhow::anyhow!(
+          "Could not write the build cache ({}): {err}",
+          cache.stats_line()
+        ))
+        .with_severity_warning(),
+      );
+    }
+    Ok(output)
   }
 
   /// A plugin may read `chunk.code` in `generateBundle` or `writeBundle` before a later hook fails, so the

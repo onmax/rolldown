@@ -702,6 +702,7 @@ const InputOptionsSchema = v.strictObject({
           v.strictObject({
             dir: v.optional(v.string()),
             key: v.optional(v.string()),
+            invalidate: v.optional(v.array(v.string())),
           }),
         ]),
       ),

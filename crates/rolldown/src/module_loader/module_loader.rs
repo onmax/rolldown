@@ -163,6 +163,7 @@ impl<Fs: FileSystem + Clone> Drop for ModuleLoader<'_, Fs> {
 }
 
 impl<'a, Fs: FileSystem + Clone + 'static> ModuleLoader<'a, Fs> {
+  #[expect(clippy::too_many_arguments)]
   pub fn new(
     fs: Fs,
     options: SharedOptions,
@@ -171,6 +172,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> ModuleLoader<'a, Fs> {
     cache: &'a mut ScanStageCache,
     is_full_scan: bool,
     magic_string_tx: Option<std::sync::mpsc::Sender<SourceMapGenMsg>>,
+    build_cache: Option<Arc<BuildCache>>,
   ) -> BuildResult<Self> {
     if is_full_scan {
       // TODO: drop the cache in another thread
@@ -196,8 +198,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> ModuleLoader<'a, Fs> {
 
     // The native magic-string path generates transform sourcemaps outside the
     // module task, so cache entries could not capture them; bypass the cache.
-    let build_cache =
-      if magic_string_tx.is_none() { BuildCache::new(&options, &plugin_driver) } else { None };
+    let build_cache = build_cache.filter(|_| magic_string_tx.is_none());
 
     // Unbounded as defense in depth. If any sender ends up driven from a sync
     // napi binding through `block_on`, a bounded channel could deadlock: the

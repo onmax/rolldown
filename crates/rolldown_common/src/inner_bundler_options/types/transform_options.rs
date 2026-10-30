@@ -223,6 +223,20 @@ impl TransformOptions {
     Some(tsconfig.path.clone())
   }
 
+  /// Whether each file uses the tsconfig discovered for it (`discover_tsconfig_file`).
+  pub fn discovers_tsconfig(&self) -> bool {
+    matches!(self.inner, TransformOptionsInner::Raw(_))
+  }
+
+  /// The config the tsconfig file at `path` resolves to (`extends` and references applied), in
+  /// a form stable across processes; `None` when it can't be resolved.
+  pub fn resolved_tsconfig_debug(&self, path: &Path) -> Option<String> {
+    let TransformOptionsInner::Raw(raw) = &self.inner else {
+      return None;
+    };
+    raw.resolver.resolve_tsconfig(path).ok().map(|tsconfig| format!("{tsconfig:?}"))
+  }
+
   /// Whether `path` was discovered as a tsconfig file by an earlier build.
   pub fn is_known_tsconfig(&self, path: &Path) -> bool {
     match &self.inner {
