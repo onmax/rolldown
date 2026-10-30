@@ -155,6 +155,8 @@ pub struct ModuleRecordStore {
   /// dependencies of the one left out would be missing from the others.
   unrecordable_files: FxDashMap<String, ()>,
   file_hashes: FxDashMap<String, Option<u64>>,
+  /// Sorted entry names of each directory read this build (`None`: missing or unreadable).
+  dir_entries: FxDashMap<String, Arc<Result<Vec<String>, std::io::ErrorKind>>>,
   pub stats: ModuleRecordStats,
 }
 
@@ -210,6 +212,7 @@ impl ModuleRecordStore {
       next: FxDashMap::default(),
       unrecordable_files: FxDashMap::default(),
       file_hashes: FxDashMap::default(),
+      dir_entries: FxDashMap::default(),
       stats: ModuleRecordStats::default(),
     }
   }
@@ -226,17 +229,18 @@ impl ModuleRecordStore {
     if let Some(hash) = self.file_hashes.get(file) {
       return *hash;
     }
-    let entries = |dir: &str, prefix: &str| match std::fs::read_dir(dir) {
-      Ok(entries) => {
-        let mut names = entries
-          .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-          .filter(|name| name.as_ref().map_or(true, |name| name.starts_with(prefix)))
-          .collect::<Result<Vec<_>, _>>()
-          .ok()?;
-        names.sort_unstable();
-        Some(xxhash_rust::xxh3::xxh3_64_with_seed(names.join("\0").as_bytes(), DIR_SEED))
+    let entries = |dir: &str, prefix: &str| match self.dir_entries(dir).as_ref() {
+      Ok(names) => {
+        let start = names.partition_point(|n| n.as_str() < prefix);
+        let matching = names[start..].iter().take_while(|n| n.starts_with(prefix));
+        let mut hasher = xxhash_rust::xxh3::Xxh3::with_seed(DIR_SEED);
+        for name in matching {
+          hasher.update(name.as_bytes());
+          hasher.update(b"\0");
+        }
+        Some(hasher.digest())
       }
-      Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(MISSING),
+      Err(std::io::ErrorKind::NotFound) => Some(MISSING),
       Err(_) => None,
     };
     let hash = if let Some((dir, prefix)) = file.split_once('\0') {
@@ -250,6 +254,24 @@ impl ModuleRecordStore {
     };
     self.file_hashes.insert(file.to_string(), hash);
     hash
+  }
+
+  fn dir_entries(&self, dir: &str) -> Arc<Result<Vec<String>, std::io::ErrorKind>> {
+    if let Some(entries) = self.dir_entries.get(dir) {
+      return Arc::clone(entries.value());
+    }
+    let entries = std::fs::read_dir(dir)
+      .and_then(|entries| {
+        entries.map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()
+      })
+      .map(|mut names| {
+        names.sort_unstable();
+        names
+      })
+      .map_err(|err| err.kind());
+    let entries = Arc::new(entries);
+    self.dir_entries.insert(dir.to_string(), Arc::clone(&entries));
+    entries
   }
 
   /// A dependency on the entries of `dir` whose names start with `prefix` (NUL can't be in a path).
