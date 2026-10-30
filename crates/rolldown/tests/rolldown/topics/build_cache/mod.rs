@@ -86,7 +86,7 @@ struct BuildResult {
 /// Builds `entry.js` in `cwd` with the persistent build cache enabled and
 /// returns per-hook invocation counts plus the entry chunk's code.
 async fn build(cwd: &Path, cache_dir: &Path, key: Option<&str>) -> anyhow::Result<BuildResult> {
-  let plugin = Arc::new(CountingPlugin::default());
+  let plugin = CountingPlugin::default();
   let (resolve_calls, load_calls, transform_calls) = (
     Arc::clone(&plugin.resolve_calls),
     Arc::clone(&plugin.load_calls),
@@ -108,7 +108,7 @@ async fn build(cwd: &Path, cache_dir: &Path, key: Option<&str>) -> anyhow::Resul
       }),
       ..Default::default()
     },
-    vec![plugin],
+    vec![Plugin::new_shared(plugin)],
   )?;
 
   let output = bundler.generate().await?;
