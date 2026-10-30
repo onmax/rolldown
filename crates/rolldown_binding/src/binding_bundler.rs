@@ -233,7 +233,10 @@ async fn report_plugin_timings(handles: &[BundleHandle]) -> anyhow::Result<()> {
     handles.iter().map(|handle| handle.plugin_driver().build_timings.total_micros()).sum();
   let link_micros: u64 =
     handles.iter().map(|handle| handle.plugin_driver().build_timings.link_stage_micros()).sum();
-  if !BuildTimings::is_plugin_bound(total_micros, link_micros) {
+  // LAB ONLY: `ROLLDOWN_PLUGIN_TIMINGS_DUMP` wants every build's rows, plugin-bound or not.
+  if !BuildTimings::is_plugin_bound(total_micros, link_micros)
+    && std::env::var_os("ROLLDOWN_PLUGIN_TIMINGS_DUMP").is_none()
+  {
     return Ok(());
   }
 
