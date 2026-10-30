@@ -107,6 +107,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
   ) -> BuildResult<NormalizedScanStageOutput> {
     trace_action!(action::BuildStart { action: "BuildStart" });
     let is_full_scan_mode = scan_mode.is_full();
+    let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
 
     let scan_stage_output = match ScanStage::new(
       Arc::clone(&self.options),
@@ -132,9 +133,11 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
       }
     };
 
+    timer.lap("scan");
     let scan_stage_output = self
       .normalize_scan_stage_output_and_update_cache(scan_stage_output, is_full_scan_mode)
       .await?;
+    timer.lap("normalize-scan-output");
 
     // Make sure the cache is reset if incremental build is not enabled.
     if !self.options.experimental.is_incremental_build_enabled() {
@@ -143,8 +146,13 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
 
     Self::trace_action_module_graph_ready(&scan_stage_output);
     self.plugin_driver.build_end(None).await?;
+    timer.lap("buildEnd-hook");
     trace_action!(action::BuildEnd { action: "BuildEnd" });
     Ok(scan_stage_output)
+  }
+
+  fn phase_label(&self) -> String {
+    self.options.dir.clone().or_else(|| self.options.file.clone()).unwrap_or_default()
   }
 
   #[inline]
@@ -192,6 +200,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     }
 
     let mut output = self.bundle_up(scan_stage_output, /* is_write */ true).await?;
+    let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
 
     self.fs.create_dir_all(&dist_dir).with_context(|| {
       format!("Could not create directory for output chunks: {}", dist_dir.display())
@@ -231,10 +240,12 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
         .with_context(|| format!("Failed to write file in {}", dest.display()))?;
     }
 
+    timer.lap("write-files");
     self
       .plugin_driver
       .write_bundle(&mut output.assets, &self.options, &mut output.warnings)
       .await?;
+    timer.lap("writeBundle-hook");
 
     output.warnings.append(&mut self.warnings);
 
@@ -305,14 +316,17 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
     // The one stretch of a build with no plugin in it, which is what makes it a usable
     // baseline for "was this build plugin-bound?" — see `BuildTimings`.
     let link_start = self.plugin_driver.build_timings.start();
+    let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
     let (mut link_stage_output, ast_table, used_symbol_refs_builder) =
       LinkStage::new(scan_stage_output, &self.options).link();
     self.plugin_driver.build_timings.record_link_stage(link_start);
+    timer.lap("link");
 
     let bundle_output =
       GenerateStage::new(&mut link_stage_output, ast_table, &self.options, &self.plugin_driver)
         .generate(used_symbol_refs_builder)
         .await; // Notice we don't use `?` to break the control flow here.
+    timer.lap("generate");
 
     // `create_output`/`make_copy` strip symbol-table scoping from the cache for
     // performance; reinstate it here, before the fallible steps below, so the
@@ -343,6 +357,7 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
       .plugin_driver
       .generate_bundle(&mut output.assets, is_write, &self.options, &mut output.warnings)
       .await?;
+    timer.lap("generateBundle-hook");
 
     if let Err(errors) =
       GenerateStage::validate_mangle_properties_output(&self.options, &output.assets)

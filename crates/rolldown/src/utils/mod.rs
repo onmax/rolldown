@@ -10,6 +10,7 @@ pub mod load_entry_module;
 pub mod load_source;
 pub mod module_id_matcher;
 pub mod parse_to_ecma_ast;
+pub mod phase_timer;
 pub mod pre_process_ecma_ast;
 pub mod prepare_build_context;
 pub mod process_code_and_sourcemap;

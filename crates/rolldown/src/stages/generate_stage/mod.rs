@@ -174,7 +174,10 @@ impl<'a> GenerateStage<'a> {
     &mut self,
     mut used_symbol_refs_builder: UsedSymbolRefsBuilder,
   ) -> BuildResult<BundleOutput> {
+    let mut timer =
+      crate::utils::phase_timer::PhaseTimer::start(|| self.options.dir.clone().unwrap_or_default());
     self.plugin_driver.render_start(self.options).await?;
+    timer.lap("generate:renderStart-hook");
     self.prepare_inline_common_chunks().await?;
     let mut chunk_graph = self.generate_chunks(&mut used_symbol_refs_builder).await?;
 
@@ -285,6 +288,7 @@ impl<'a> GenerateStage<'a> {
       &final_esm_init_metadata,
     )?;
     self.detect_ineffective_dynamic_imports(&chunk_graph);
+    timer.lap("generate:chunk-graph");
     self.render_chunk_to_assets(&chunk_graph, ast_table, &used_symbol_refs, &order_state).await
   }
 
