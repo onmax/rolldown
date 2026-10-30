@@ -34,7 +34,7 @@ use rolldown_common::{
 };
 use rolldown_sourcemap::SourceMap;
 use rolldown_utils::{
-  dashmap::FxDashMap,
+  dashmap::{FxDashMap, FxDashSet},
   rayon::{IntoParallelIterator, ParallelIterator},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -44,6 +44,8 @@ const FORMAT_VERSION: u32 = 3;
 /// Records are split by id into shards, so a build that changed a few modules rewrites a few
 /// shards instead of every record.
 const SHARDS: usize = 32;
+/// See `ModuleRecordStore::save`.
+pub const UNRECORDED_DEPS: &str = "unrecorded-deps.json";
 
 /// The hash recorded for a dependency that doesn't exist.
 pub const MISSING: u64 = 0;
@@ -341,17 +343,27 @@ impl ModuleRecordStore {
   /// Writes the records of this build, replacing the previous ones. A record's `meta` becomes the
   /// one the JS side handed over for its id (`""` for none); without an entry, it stays as it was.
   /// A shard whose records are the previous ones, unchanged, is not written again.
-  pub fn save(&self, meta: &FxDashMap<ArcStr, ArcStr>) -> std::io::Result<usize> {
+  ///
+  /// When some module could not be recorded, its dependencies are unknown to the records, so the
+  /// files the whole build watched are written to `UNRECORDED_DEPS`: a tool that reuses a whole
+  /// build's output from this cache must check them too. The file is removed otherwise.
+  pub fn save(
+    &self,
+    meta: &FxDashMap<ArcStr, ArcStr>,
+    watch_files: &FxDashSet<ArcStr>,
+  ) -> std::io::Result<usize> {
+    // `!`: the module's `meta` can't be kept (not JSON), so neither can the module, nor the other
+    // ids of its file, whose dependencies may be the ones it declared.
+    for entry in meta.iter().filter(|m| m.value().as_str() == "!") {
+      if let Some((file, _)) = self.next.get(entry.key()).and_then(|r| r.files.first().cloned()) {
+        self.unrecordable(&file);
+      }
+    }
     let mut shards: Vec<Vec<Arc<ModuleRecord>>> = vec![Vec::new(); SHARDS];
     for entry in &self.next {
       let mut record = Arc::clone(entry.value());
       let shard = shard_of(entry.key());
       if record.files.first().is_some_and(|(file, _)| self.unrecordable_files.contains_key(file)) {
-        self.dirty[shard].store(true, Ordering::Relaxed);
-        continue;
-      }
-      // `!`: the module's `meta` can't be kept (not JSON), so neither can the module.
-      if meta.get(entry.key()).is_some_and(|m| m.as_str() == "!") {
         self.dirty[shard].store(true, Ordering::Relaxed);
         continue;
       }
@@ -367,6 +379,21 @@ impl ModuleRecordStore {
       shards[shard].push(record);
     }
     std::fs::create_dir_all(&self.dir)?;
+    let unrecorded = self.dir.join(UNRECORDED_DEPS);
+    if self.unrecordable_files.is_empty() {
+      if unrecorded.exists() {
+        std::fs::remove_file(&unrecorded)?;
+      }
+    } else {
+      let mut files: Vec<String> = watch_files.iter().map(|f| f.key().to_string()).collect();
+      files.extend(self.unrecordable_files.iter().map(|f| f.key().clone()));
+      files.sort_unstable();
+      files.dedup();
+      let bytes = serde_json::to_vec(&files)?;
+      if std::fs::read(&unrecorded).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&unrecorded, bytes)?;
+      }
+    }
     let written = shards
       .into_iter()
       .enumerate()

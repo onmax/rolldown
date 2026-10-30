@@ -80,7 +80,10 @@ export class PluginContextData {
   }
 
   updateModuleOption(id: string, option: ModuleOptions): ModuleOptions {
-    const existing = this.moduleOptionMap.get(id);
+    // A reused module's kept `meta` goes under what is written once its task decided.
+    const existing = this.incrementalBuildCache
+      ? this.getModuleOption(id)
+      : this.moduleOptionMap.get(id);
     if (existing) {
       if (option.moduleSideEffects != null) {
         existing.moduleSideEffects = option.moduleSideEffects;
@@ -111,7 +114,11 @@ export class PluginContextData {
     return option;
   }
 
-  /** Adds the `meta` kept in a reused module's record under what hooks set this build. */
+  /**
+   * Restores the `meta` kept in a reused module's record. It is the `meta` the module ended the
+   * last build with, so it replaces what `resolveId` set before the module's task decided (the
+   * same hooks ran then too) and is overwritten by everything written after.
+   */
   private restoreKeptMeta(id: string, option: ModuleOptions): void {
     if (this.keptMetaChecked.has(id) || !this.bindingContext) return;
     const kept = this.bindingContext.getReusedModuleMeta(id);
@@ -120,9 +127,7 @@ export class PluginContextData {
     this.keptMetaChecked.add(id);
     if (!kept) return;
     option.meta ??= {};
-    for (const [key, value] of Object.entries(JSON.parse(kept))) {
-      if (!(key in option.meta)) option.meta[key] = value;
-    }
+    Object.assign(option.meta, JSON.parse(kept));
   }
 
   getModuleInfo(id: string, context: BindingPluginContext): ModuleInfo | null {

@@ -367,7 +367,9 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
   /// directory it points into named like its last segment (`./dep` → `dep*`); for each resolved
   /// file outside `node_modules`, the entries next to it named like its stem (`Foo.vue` → `Foo*`),
   /// and for an `index` file the entries named like its directory (`dep.js` beats `dep/index.js`).
-  /// Packages are covered by the caller's `key` (lockfile).
+  /// A bare specifier that resolves to a local package (outside `node_modules`) also depends on
+  /// that package's `package.json` (its `exports`, `main`, `imports`). Packages in `node_modules`
+  /// are covered by the caller's `key` (lockfile).
   fn resolution_dirs(
     importer: &str,
     raw_import_records: &IndexVec<rolldown_common::ImportRecordIdx, rolldown_common::RawImportRecord>,
@@ -389,6 +391,17 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
         push(&normalize_path(&base.join(specifier)));
       }
     }
+    let mut package_jsons: Vec<String> = vec![];
+    for (record, dep) in raw_import_records.iter().zip(resolved_deps.iter()) {
+      let specifier = record.module_request.as_str();
+      if let Some(package_json) = dep.package_json.as_ref().map(|p| p.realpath().to_string_lossy())
+        && !specifier.starts_with(['.', '/', '\0'])
+        && !package_json.contains("/node_modules/")
+        && !package_jsons.iter().any(|d| *d == package_json)
+      {
+        package_jsons.push(package_json.into_owned());
+      }
+    }
     for dep in resolved_deps {
       let Some(file) = ModuleRecordStore::file_of(dep.id.as_str()).map(Path::new) else { continue };
       let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else { continue };
@@ -397,6 +410,7 @@ impl<Fs: FileSystem + Clone + 'static> ModuleTask<Fs> {
         push(dir);
       }
     }
+    deps.extend(package_jsons);
     deps.sort_unstable();
     deps
   }

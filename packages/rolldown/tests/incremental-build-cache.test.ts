@@ -24,7 +24,7 @@ function records() {
   return Object.fromEntries(
     fs
       .readdirSync(cacheDir)
-      .filter((f) => f.endsWith('.json'))
+      .filter((f) => f.startsWith('module-records-'))
       .map((f) => [f, fs.readFileSync(path.join(cacheDir, f), 'utf8')]),
   );
 }
@@ -286,6 +286,43 @@ test('`meta` nobody reads in a build is still kept for the next one', async () =
   expect(await run()).toEqual({ tag: 1 });
 });
 
+test('`meta` a later hook overwrote wins over what `resolveId` sets again for a reused module', async () => {
+  const run = async () => {
+    let seen: unknown;
+    let transformed = false;
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'meta',
+          resolveId(source, importer) {
+            if (source === './main.js' && !importer)
+              return { id: path.join(root, 'main.js'), meta: { meta: { p: 'resolve' } } };
+          },
+          transform(_code, id) {
+            if (!id.endsWith('main.js')) return;
+            transformed = true;
+            return { meta: { meta: { p: 'transform' } } };
+          },
+          renderChunk(_code, chunk) {
+            const id = chunk.moduleIds.find((m) => m.endsWith('main.js'));
+            if (id) seen = this.getModuleInfo(id)?.meta.meta;
+            return null;
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return { seen, transformed };
+  };
+  fs.writeFileSync(path.join(root, 'main.js'), `console.log('main');\n`);
+  expect(await run()).toEqual({ seen: { p: 'transform' }, transformed: true });
+  expect(await run()).toEqual({ seen: { p: 'transform' }, transformed: false });
+});
+
 test('no id of a file is kept when one of its ids emitted a file', async () => {
   // The main id declares `data.txt` and emits a file, so it is never recorded; the `?variant` id
   // built from what it read must not be reused with its dependency missing.
@@ -321,8 +358,76 @@ test('no id of a file is kept when one of its ids emitted a file', async () => {
     return output.output[0].code;
   };
   expect(await run()).toContain('"one"');
+  // Its dependencies are in no record, so the build's watched files are written out.
+  const unrecorded = JSON.parse(
+    fs.readFileSync(path.join(cacheDir, 'unrecorded-deps.json'), 'utf8'),
+  );
+  expect(unrecorded).toContain(path.join(root, 'data.txt'));
   fs.writeFileSync(path.join(root, 'data.txt'), 'two');
   expect(await run()).toContain('"two"');
+});
+
+test('no id of a file is kept when one of its ids has `meta` that is not JSON', async () => {
+  // As above, with the main id dropped because its `meta` can't be written.
+  fs.writeFileSync(
+    path.join(root, 'main.js'),
+    `import { dep } from './dep.js';\nimport variant from './dep.js?variant';\nconsole.log(dep, variant);\n`,
+  );
+  const run = async () => {
+    let seen = '';
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      plugins: [
+        {
+          name: 'sfc-like',
+          load(id) {
+            if (!id.endsWith('dep.js?variant')) return;
+            return `export default ${JSON.stringify(seen || fs.readFileSync(path.join(root, 'data.txt'), 'utf8'))};`;
+          },
+          transform(code, id) {
+            if (!id.endsWith('dep.js')) return;
+            this.addWatchFile(path.join(root, 'data.txt'));
+            seen = fs.readFileSync(path.join(root, 'data.txt'), 'utf8');
+            return { code, meta: { sfc: { size: 1n } } };
+          },
+        },
+      ],
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"one"');
+  fs.writeFileSync(path.join(root, 'data.txt'), 'two');
+  expect(await run()).toContain('"two"');
+});
+
+test('a local package import follows a change to its package.json entry', async () => {
+  const pkg = path.join(root, 'packages/pkg');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'a.js'), `export default 'a';\n`);
+  fs.writeFileSync(path.join(pkg, 'b.js'), `export default 'b';\n`);
+  const manifest = (main: string) =>
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'pkg', main }));
+  manifest('./a.js');
+  fs.mkdirSync(path.join(root, 'node_modules'));
+  fs.symlinkSync('../packages/pkg', path.join(root, 'node_modules/pkg'), 'dir');
+  fs.writeFileSync(path.join(root, 'main.js'), `import v from 'pkg';\nconsole.log(v);\n`);
+  const run = async () => {
+    const bundle = await rolldown({
+      input: './main.js',
+      cwd: root,
+      experimental: { incrementalBuildCache: { dir: cacheDir } },
+    });
+    const output = await bundle.generate({ format: 'esm' });
+    await bundle.close();
+    return output.output[0].code;
+  };
+  expect(await run()).toContain('"a"');
+  manifest('./b.js');
+  expect(await run()).toContain('"b"');
 });
 
 test('a directory passed to addWatchFile invalidates when its entries change', async () => {
