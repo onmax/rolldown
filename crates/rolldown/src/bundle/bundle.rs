@@ -271,16 +271,21 @@ impl<Fs: FileSystem + Clone + 'static> Bundle<Fs> {
   /// fails a build.
   fn save_build_cache(&self, result: BuildResult<BundleOutput>) -> BuildResult<BundleOutput> {
     let mut output = result?;
-    if let Some(cache) = &self.build_cache
-      && let Err(err) = cache.save(&self.plugin_driver)
-    {
-      output.warnings.push(
-        BuildDiagnostic::unhandleable_error(anyhow::anyhow!(
-          "Could not write the build cache ({}): {err}",
-          cache.stats_line()
-        ))
-        .with_severity_warning(),
-      );
+    if let Some(cache) = &self.build_cache {
+      let mut timer = crate::utils::phase_timer::PhaseTimer::start(|| self.phase_label());
+      match cache.save(&self.plugin_driver) {
+        Ok(written) => {
+          timer
+            .lap(&format!("save-build-cache ({}) entries-written {written}", cache.stats_line()));
+        }
+        Err(err) => output.warnings.push(
+          BuildDiagnostic::unhandleable_error(anyhow::anyhow!(
+            "Could not write the build cache ({}): {err}",
+            cache.stats_line()
+          ))
+          .with_severity_warning(),
+        ),
+      }
     }
     Ok(output)
   }

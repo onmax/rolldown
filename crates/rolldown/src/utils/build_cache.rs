@@ -178,6 +178,7 @@ pub struct BuildCacheStats {
   pub missing: AtomicU32,
   pub changed: AtomicU32,
   pub invalidated: AtomicU32,
+  pub excluded: AtomicU32,
   pub kept: AtomicU32,
 }
 
@@ -198,6 +199,9 @@ pub struct BuildCache {
   salt: String,
   cwd: PathBuf,
   invalidate: FxHashSet<String>,
+  // LAB ONLY: `ROLLDOWN_BUILD_CACHE_EXCLUDE`, comma-separated id substrings never reused.
+  // Stands in for a plugin-declared opt-out until `shouldTransformCachedModule` exists.
+  exclude: Vec<String>,
   kept: FxDashMap<ArcStr, Kept>,
   /// The key looked up for each id, so entries of ids that turn out uncacheable are removed.
   keys: FxDashMap<ArcStr, String>,
@@ -287,6 +291,9 @@ impl BuildCache {
       salt,
       cwd: options.cwd.clone(),
       invalidate: cache_options.invalidate.iter().flatten().cloned().collect(),
+      exclude: std::env::var("ROLLDOWN_BUILD_CACHE_EXCLUDE")
+        .map(|v| v.split(',').filter(|s| !s.is_empty()).map(ToString::to_string).collect())
+        .unwrap_or_default(),
       kept: FxDashMap::default(),
       keys: FxDashMap::default(),
       uncacheable_files: FxDashSet::default(),
@@ -336,13 +343,27 @@ impl BuildCache {
     };
     let key = self.cache_key(stable_id, asserted_module_type, file_hash);
     self.keys.insert(id.clone(), key.clone());
-    match self.find(&key) {
+    let module = self.find(id, &key);
+    // LAB ONLY: `ROLLDOWN_BUILD_CACHE_DEBUG=<file>` appends every id that is not reused.
+    if module.is_none()
+      && let Some(path) = std::env::var_os("ROLLDOWN_BUILD_CACHE_DEBUG")
+    {
+      use std::io::Write;
+      if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}\t{id}", self.root.display());
+      }
+    }
+    match module {
       Some(module) => Lookup::Hit { key, module },
       None => Lookup::Miss { key },
     }
   }
 
-  fn find(&self, key: &str) -> Option<CachedModule> {
+  fn find(&self, id: &str, key: &str) -> Option<CachedModule> {
+    if self.exclude.iter().any(|s| id.contains(s.as_str())) {
+      self.stats.excluded.fetch_add(1, Ordering::Relaxed);
+      return None;
+    }
     // Any malformed or unreadable entry is a miss; the build then recomputes and rewrites it.
     let Some(module) = std::fs::read(self.entry_path(key)).ok().and_then(|b| self.decode(&b))
     else {
@@ -628,11 +649,12 @@ impl BuildCache {
   pub fn stats_line(&self) -> String {
     let s = &self.stats;
     format!(
-      "hit {} missing {} changed {} invalidated {} kept {}",
+      "hit {} missing {} changed {} invalidated {} excluded {} kept {}",
       s.hit.load(Ordering::Relaxed),
       s.missing.load(Ordering::Relaxed),
       s.changed.load(Ordering::Relaxed),
       s.invalidated.load(Ordering::Relaxed),
+      s.excluded.load(Ordering::Relaxed),
       s.kept.load(Ordering::Relaxed),
     )
   }
@@ -979,6 +1001,7 @@ mod tests {
       salt: "salt".into(),
       cwd: cwd.to_path_buf(),
       invalidate: FxHashSet::default(),
+      exclude: vec![],
       kept: FxDashMap::default(),
       keys: FxDashMap::default(),
       uncacheable_files: FxDashSet::default(),
