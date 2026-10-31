@@ -370,8 +370,10 @@ export function collectChangedBundle(
   bundle: OutputBundle,
 ): JsChangedOutputs {
   const changes: Record<string, JsOutputChunk | JsOutputAsset> = {};
-  for (const key in bundle) {
-    if (changed.deleted.has(key) || !changed.updated.has(key)) {
+  // Only the outputs a wrapper recorded as changed, not every key of the bundle per hook call
+  // (Rust takes the changes as a map, so their order doesn't matter).
+  for (const key of changed.updated) {
+    if (changed.deleted.has(key) || !(key in bundle)) {
       continue;
     }
     const item = bundle[key];
