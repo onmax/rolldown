@@ -61,7 +61,7 @@ use rolldown_plugin::{HookUsage, PluginDriver};
 use rolldown_sourcemap::SourceMap;
 use rolldown_utils::{
   dashmap::{FxDashMap, FxDashSet},
-  rayon::{IntoParallelIterator, ParallelIterator},
+  rayon::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
   stabilize_id::stabilize_id,
   xxhash::xxhash_with_base,
 };
@@ -83,6 +83,44 @@ const PORTABLE_SOURCE: char = '\u{1}';
 pub const TSCONFIG_DEP: &str = "\0\0tsconfig";
 /// See `BuildCache::save`.
 pub const BUILD_DEPS: &str = "build-deps.json";
+
+/// What saving does with one kept entry.
+enum Saved {
+  Write(PathBuf, CachedModule),
+  Remove(PathBuf),
+  Keep,
+}
+
+/// The entries of one file as saved, and the dependencies they list after the file itself.
+type SavedFile = (Vec<Saved>, Vec<(String, u64)>);
+
+/// What every entry of `file` lists after its own first item: the dependencies of all of them and
+/// `extra`, without `file` itself, sorted, each once.
+fn shared_rest(
+  file: &str,
+  entries: &[&[(String, u64)]],
+  extra: Option<&[(String, u64)]>,
+) -> Vec<(String, u64)> {
+  if let ([only], None) = (entries, extra)
+    && is_canonical(only)
+  {
+    return only[1..].to_vec();
+  }
+  let mut set: FxHashSet<&(String, u64)> = FxHashSet::default();
+  for files in entries {
+    set.extend(files.iter());
+  }
+  set.extend(extra.into_iter().flatten());
+  let mut rest: Vec<(String, u64)> = set.into_iter().filter(|dep| dep.0 != file).cloned().collect();
+  rest.sort_unstable();
+  rest
+}
+
+/// `files` in the stored order: the module's file, then its other dependencies sorted, each once.
+fn is_canonical(files: &[(String, u64)]) -> bool {
+  let Some(((first, _), rest)) = files.split_first() else { return true };
+  rest.iter().all(|(f, _)| f != first) && rest.windows(2).all(|w| w[0] < w[1])
+}
 
 /// Rolldown's always-registered inner plugins (see `apply_inner_plugins`):
 /// their hooks are native early-return filters whose cost is far below the
@@ -571,50 +609,83 @@ impl BuildCache {
         self.uncacheable(&file);
       }
     }
-    let mut deps_by_file: FxHashMap<String, FxHashSet<(String, u64)>> = FxHashMap::default();
-    for entry in &self.kept {
-      let Some(file) = file_of_kept(entry.value()) else { continue };
-      deps_by_file.entry(file).or_default().extend(entry.value().module.files.iter().cloned());
+    // The kept entries grouped by the file they are keyed on (query siblings share one): every
+    // entry of a file lists the dependencies of all of them.
+    let kept: Vec<(ArcStr, String, Arc<CachedModule>, bool)> = self
+      .kept
+      .iter()
+      .map(|e| {
+        (e.key().clone(), e.value().key.clone(), Arc::clone(&e.value().module), e.value().unchanged)
+      })
+      .collect();
+    let mut by_file: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+    for (i, (_, _, module, _)) in kept.iter().enumerate() {
+      if let Some((file, _)) = module.files.first() {
+        by_file.entry(file.as_str()).or_default().push(i);
+      }
     }
     // Files hooks watched while resolving a module's imports.
+    let mut hook_deps: FxHashMap<&str, Vec<(String, u64)>> = FxHashMap::default();
     for entry in &plugin_driver.module_hook_dependencies {
       let Some(file) = Self::file_of(entry.key()) else { continue };
-      let Some(deps) = deps_by_file.get_mut(file) else { continue };
+      let Some((&file, _)) = by_file.get_key_value(file) else { continue };
       for dep in entry.value().iter() {
         match self.hash_file(dep.key()) {
-          Some(hash) => {
-            deps.insert((dep.key().clone(), hash));
-          }
+          Some(hash) => hook_deps.entry(file).or_default().push((dep.key().clone(), hash)),
           None => self.uncacheable(file),
         }
       }
     }
+    let groups: Vec<(&str, &Vec<usize>)> = by_file.iter().map(|(f, ids)| (*f, ids)).collect();
+    let per_file: Vec<SavedFile> = groups
+      .par_iter()
+      .map(|&(file, ids)| {
+        let extra = hook_deps.get(file);
+        // An entry stores its own file first (with the hash it read), then every other dependency
+        // of the file's entries sorted, each once.
+        let entries: Vec<&[(String, u64)]> =
+          ids.iter().map(|&i| kept[i].2.files.as_slice()).collect();
+        let rest = shared_rest(file, &entries, extra.map(Vec::as_slice));
+        let uncacheable = self.uncacheable_files.contains(file);
+        let saved = ids
+          .iter()
+          .map(|&i| {
+            let (id, key, module, unchanged) = &kept[i];
+            if uncacheable {
+              return Saved::Remove(self.entry_path(key));
+            }
+            let next_meta = match meta.get(id) {
+              Some(m) if m.is_empty() => None,
+              Some(m) => Some(m.value().to_string()),
+              None => module.meta.clone(),
+            };
+            let same_files = module.files.len() == rest.len() + 1 && module.files[1..] == rest[..];
+            if *unchanged && same_files && module.meta == next_meta {
+              return Saved::Keep;
+            }
+            let mut module = CachedModule::clone(module);
+            module.files.truncate(1);
+            module.files.extend(rest.iter().cloned());
+            module.meta = next_meta;
+            Saved::Write(self.entry_path(key), module)
+          })
+          .collect();
+        (saved, rest)
+      })
+      .collect();
     let mut writes = vec![];
     let mut removes = vec![];
-    for entry in &self.kept {
-      let kept = entry.value();
-      let Some(file) = file_of_kept(kept) else { continue };
-      if self.uncacheable_files.contains(&file) {
-        removes.push(self.entry_path(&kept.key));
-        continue;
+    let mut deps: Vec<&str> = vec![];
+    for (&(file, _), (saved, rest)) in groups.iter().zip(&per_file) {
+      deps.push(file);
+      deps.extend(rest.iter().map(|(f, _)| f.as_str()));
+      for s in saved {
+        match s {
+          Saved::Write(path, module) => writes.push((path, module)),
+          Saved::Remove(path) => removes.push(path.clone()),
+          Saved::Keep => {}
+        }
       }
-      let mut files = vec![kept.module.files[0].clone()];
-      let mut rest: Vec<_> =
-        deps_by_file[&file].iter().filter(|dep| dep.0 != file).cloned().collect();
-      rest.sort_unstable();
-      files.extend(rest);
-      let next_meta = match meta.get(entry.key()) {
-        Some(m) if m.is_empty() => None,
-        Some(m) => Some(m.value().to_string()),
-        None => kept.module.meta.clone(),
-      };
-      if kept.unchanged && kept.module.files == files && kept.module.meta == next_meta {
-        continue;
-      }
-      let mut module = CachedModule::clone(&kept.module);
-      module.files = files;
-      module.meta = next_meta;
-      writes.push((self.entry_path(&kept.key), module));
     }
     for entry in &self.keys {
       if Self::file_of(entry.key()).is_some_and(|f| self.uncacheable_files.contains(f))
@@ -625,9 +696,12 @@ impl BuildCache {
     }
 
     std::fs::create_dir_all(&self.root)?;
-    let mut deps: Vec<String> = deps_by_file.values().flatten().map(|(f, _)| f.clone()).collect();
-    deps.extend(plugin_driver.watch_files.iter().map(|f| f.key().to_string()));
-    deps.extend(self.uncacheable_files.iter().map(|f| f.key().clone()));
+    let watch_files: Vec<String> =
+      plugin_driver.watch_files.iter().map(|f| f.key().to_string()).collect();
+    let uncacheable_files: Vec<String> =
+      self.uncacheable_files.iter().map(|f| f.key().clone()).collect();
+    deps.extend(watch_files.iter().map(String::as_str));
+    deps.extend(uncacheable_files.iter().map(String::as_str));
     deps.sort_unstable();
     deps.dedup();
     let build_deps = self.root.join(BUILD_DEPS);
@@ -641,7 +715,7 @@ impl BuildCache {
     let written = writes.len();
     writes.into_par_iter().try_for_each(|(path, module)| {
       std::fs::create_dir_all(path.parent().expect("entry paths have a parent"))?;
-      write_atomically(&path, &self.encode(&module)?)
+      write_atomically(path, &self.encode(module)?)
     })?;
     Ok(written)
   }
@@ -993,6 +1067,62 @@ impl CachedResolvedId {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  type Files = Vec<(String, u64)>;
+
+  /// `files` of each entry of one file as `save` wrote them before entries were grouped.
+  fn files_before_grouping(
+    file: &str,
+    entries: &[Vec<(String, u64)>],
+    extra: &[(String, u64)],
+  ) -> Vec<Vec<(String, u64)>> {
+    let mut deps: FxHashSet<(String, u64)> = FxHashSet::default();
+    for files in entries {
+      deps.extend(files.iter().cloned());
+    }
+    deps.extend(extra.iter().cloned());
+    entries
+      .iter()
+      .map(|files| {
+        let mut rest: Vec<_> = deps.iter().filter(|dep| dep.0 != file).cloned().collect();
+        rest.sort_unstable();
+        std::iter::once(files[0].clone()).chain(rest).collect()
+      })
+      .collect()
+  }
+
+  #[test]
+  fn grouped_save_lists_what_it_listed_before() {
+    let d = |p: &str, h: u64| (p.to_string(), h);
+    let f = "/a/X.vue";
+    let cases: Vec<(Vec<Files>, Files)> = vec![
+      // One entry, already in stored order.
+      (vec![vec![d(f, 1), d("/a/b.ts", 2), d("/a/c.ts", 3)]], vec![]),
+      // One entry out of order, with a duplicate and its own file again.
+      (vec![vec![d(f, 1), d("/a/c.ts", 3), d("/a/b.ts", 2), d("/a/b.ts", 2), d(f, 1)]], vec![]),
+      // Query siblings with different dependencies and a different hash of the file itself.
+      (
+        vec![
+          vec![d(f, 11), d("/a/b.ts", 2)],
+          vec![d(f, 22), d("/a/style.css", 4), d("/a/b.ts", 2)],
+        ],
+        vec![],
+      ),
+      // Hook dependencies, one of them already listed.
+      (vec![vec![d(f, 1), d("/a/b.ts", 2)]], vec![d("/a/dir\0pre", 5), d("/a/b.ts", 2)]),
+      // A dependency on the same path with another hash.
+      (vec![vec![d(f, 1), d("/a/b.ts", 2)], vec![d(f, 1), d("/a/b.ts", 9)]], vec![]),
+    ];
+    for (entries, extra) in cases {
+      let slices: Vec<&[(String, u64)]> = entries.iter().map(Vec::as_slice).collect();
+      let rest = shared_rest(f, &slices, (!extra.is_empty()).then_some(extra.as_slice()));
+      let now: Vec<Vec<(String, u64)>> = entries
+        .iter()
+        .map(|files| std::iter::once(files[0].clone()).chain(rest.iter().cloned()).collect())
+        .collect();
+      assert_eq!(now, files_before_grouping(f, &entries, &extra), "{entries:?} {extra:?}");
+    }
+  }
 
   fn cache(cwd: &Path) -> BuildCache {
     BuildCache {
