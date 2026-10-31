@@ -3,6 +3,7 @@ import type {
   BindingOutputs,
   BindingPluginContext,
   BindingPluginOptions,
+  BindingRenderedChunk,
   BindingResult,
 } from '../binding.cjs';
 import { RolldownMagicString } from '../binding-magic-string';
@@ -17,6 +18,7 @@ import { bindingifyRenderChunkFilter } from './bindingify-hook-filter';
 import type { BindingifyPluginArgs } from './bindingify-plugin';
 import { bindingifyHook, type PluginHookWithBindingExt } from './bindingify-plugin-hook-meta';
 import type { RenderedChunkMeta } from './index';
+import type { RenderedChunk } from '../types/rolldown-output';
 import { createPluginContext } from './plugin-context';
 
 export function bindingifyRenderStart(
@@ -32,19 +34,54 @@ export function bindingifyRenderStart(
     },
   }));
 }
+// The chunk a `renderChunk` or `augmentChunkHash` hook gets is one object per chunk for every hook
+// of the output, the one in `meta.chunks`, as in Rollup: what a hook sets on it is seen by the hooks
+// after it, and each field is read from Rust once instead of once per hook. Objects are kept with the
+// identity of their Rust data, so a chunk of another output gets its own. A context that is never
+// cleared (a parallel plugin's worker) keeps none and gives each call its own object, as before.
+function renderedChunkOf(
+  args: BindingifyPluginArgs,
+  chunk: BindingRenderedChunk,
+  identity = chunk.getIdentity(),
+): RenderedChunk {
+  const cache = args.pluginContextData.renderedChunks;
+  if (!cache) return transformRenderedChunk(chunk);
+  const fileName = chunk.fileName;
+  const cached = cache.get(fileName);
+  if (cached?.identity === identity) return cached.chunk;
+  const created = transformRenderedChunk(chunk);
+  cache.set(fileName, { identity, chunk: created });
+  return created;
+}
+
 export function bindingifyRenderChunk(
   args: BindingifyPluginArgs,
 ): PluginHookWithBindingExt<BindingPluginOptions['renderChunk'], BindingHookFilter | undefined> {
   return bindingifyHook(args.plugin.renderChunk, ({ handler, options }) => ({
     plugin: async (ctx, code, chunk, opts, meta) => {
-      // cache the chunks binding to deduplicated avoid clone chunks
-      if (args.pluginContextData.getRenderChunkMeta() == null) {
-        args.pluginContextData.setRenderChunkMeta({
-          chunks: Object.fromEntries(
-            Object.entries(meta.chunks).map(([key, value]) => [key, transformRenderedChunk(value)]),
-          ),
-        });
+      const data = args.pluginContextData;
+      const identity = chunk.getIdentity();
+      // The chunks map is made once per output and shared by every call. One made for another
+      // output (an earlier rebuild, in a context that is never cleared) doesn't have this call's
+      // chunk; the kept chunk objects are then those of this output only.
+      if (data.renderChunkMetaIdentities.get(chunk.fileName) !== identity) {
+        const identities = new Map<string, number>();
+        const chunks = Object.fromEntries(
+          Object.entries(meta.chunks).map(([key, value]) => {
+            const valueIdentity = value.getIdentity();
+            identities.set(key, valueIdentity);
+            return [key, renderedChunkOf(args, value, valueIdentity)];
+          }),
+        );
+        data.setRenderChunkMeta({ chunks });
+        data.renderChunkMetaIdentities = identities;
+        if (data.renderedChunks) {
+          for (const key of data.renderedChunks.keys()) {
+            if (!identities.has(key)) data.renderedChunks.delete(key);
+          }
+        }
       }
+      const renderedChunk = renderedChunkOf(args, chunk, identity);
       // Per-chunk calls of this hook run concurrently, so only the chunks map
       // is shared through the cache; each call gets its own meta object. A
       // getter defined on one shared object would be replaced by whichever
@@ -72,7 +109,7 @@ export function bindingifyRenderChunk(
       const ret = await handler.call(
         createPluginContext(args, ctx),
         code,
-        transformRenderedChunk(chunk),
+        renderedChunk,
         args.pluginContextData.getOutputOptions(opts),
         renderChunkMeta,
       );
@@ -147,7 +184,7 @@ export function bindingifyAugmentChunkHash(
 ): PluginHookWithBindingExt<BindingPluginOptions['augmentChunkHash']> {
   return bindingifyHook(args.plugin.augmentChunkHash, ({ handler }) => ({
     plugin: async (ctx, chunk) => {
-      return handler.call(createPluginContext(args, ctx), transformRenderedChunk(chunk));
+      return handler.call(createPluginContext(args, ctx), renderedChunkOf(args, chunk));
     },
   }));
 }

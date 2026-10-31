@@ -16,6 +16,13 @@ impl BindingRenderedChunk {
     Self { inner }
   }
 
+  /// The address of the chunk's data: the same for every hook of one output's render, and unique
+  /// while a `BindingRenderedChunk` keeps the data alive.
+  #[napi]
+  pub fn get_identity(&self) -> i64 {
+    i64::try_from(Arc::as_ptr(&self.inner).addr()).unwrap_or(i64::MAX)
+  }
+
   #[napi(getter)]
   pub fn get_name(&self) -> &str {
     &self.inner.name

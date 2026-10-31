@@ -66,7 +66,7 @@ export interface RenderedModule {
  *
  * @category Plugin APIs
  */
-export interface RenderedChunk extends Omit<BindingRenderedChunk, 'modules'> {
+export interface RenderedChunk extends Omit<BindingRenderedChunk, 'modules' | 'getIdentity'> {
   type: 'chunk';
   /** Information about the modules included in this chunk. */
   modules: {

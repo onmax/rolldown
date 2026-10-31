@@ -1861,6 +1861,11 @@ export declare class BindingPluginContext {
 }
 
 export declare class BindingRenderedChunk {
+  /**
+   * The address of the chunk's data: the same for every hook of one output's render, and unique
+   * while a `BindingRenderedChunk` keeps the data alive.
+   */
+  getIdentity(): number
   get name(): string
   get isEntry(): boolean
   get isDynamicEntry(): boolean

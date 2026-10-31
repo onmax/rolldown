@@ -11,6 +11,7 @@ import type { LogHandler } from '../log/log-handler';
 import { NormalizedInputOptionsImpl } from '../options/normalized-input-options';
 import { NormalizedOutputOptionsImpl } from '../options/normalized-output-options';
 import type { ModuleInfo } from '../types/module-info';
+import type { RenderedChunk } from '../types/rolldown-output';
 import type { KeptModuleOptions } from '../utils/build-cache-meta';
 import { transformModuleInfo } from '../utils/transform-module-info';
 import {
@@ -59,6 +60,10 @@ export class PluginContextData {
   resolveOptionsMap: Map<number, PluginContextResolveOptions> = new Map();
   loadModulePromiseMap: Map<string, Promise<void>> = new Map();
   renderedChunkMeta: RenderedChunkMeta | null = null;
+  /** The chunk objects of `renderChunk` and `augmentChunkHash` hooks; see `renderedChunkOf`. */
+  renderedChunks: Map<string, { identity: number; chunk: RenderedChunk }> | null;
+  /** The identity of every chunk in `renderedChunkMeta`, by file name. */
+  renderChunkMetaIdentities: Map<string, number> = new Map();
   normalizedInputOptions: NormalizedInputOptions | null = null;
   normalizedOutputOptions: NormalizedOutputOptions | null = null;
   /**
@@ -76,8 +81,11 @@ export class PluginContextData {
     private normalizedInputPlugins: RolldownPlugin[],
     private normalizedOutputPlugins: RolldownPlugin[],
     cacheOutputCode = true,
+    // False where `clear()` never runs (a parallel plugin's worker): kept chunk objects would pile up.
+    keepRenderedChunks = true,
   ) {
     this.outputCodeCache = cacheOutputCode ? new Map() : null;
+    this.renderedChunks = keepRenderedChunks ? new Map() : null;
   }
 
   updateModuleOption(id: string, option: ModuleOptions): ModuleOptions {
@@ -210,6 +218,8 @@ export class PluginContextData {
 
   clear(): void {
     this.renderedChunkMeta = null;
+    this.renderedChunks?.clear();
+    this.renderChunkMetaIdentities = new Map();
     this.loadModulePromiseMap.clear();
     // Watch mode reuses this object across rebuilds; entries hold the previous build's chunk data.
     this.outputCodeCache?.clear();

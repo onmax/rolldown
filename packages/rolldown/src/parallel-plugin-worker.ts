@@ -28,6 +28,7 @@ const { registryId, pluginInfos, threadNumber } = workerData as WorkerData;
           [],
           [],
           /* cacheOutputCode */ false,
+          /* keepRenderedChunks */ false,
         );
         return {
           index: pluginInfo.index,
