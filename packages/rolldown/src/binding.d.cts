@@ -1553,6 +1553,20 @@ export interface TypeScriptOptions {
   rewriteImportExtensions?: 'rewrite' | 'remove' | boolean
 }
 
+/**
+ * The bundle a `generateBundle` or `writeBundle` hook gets, read on demand. A build with thousands
+ * of outputs and a dozen such hooks made a JS object per output per hook as `BindingOutputs`;
+ * with this, JS asks for the identities once per hook and only for the outputs it hasn't seen.
+ */
+export declare class BindingBundle {
+  /** `BindingOutputChunk::get_code_identity` of every chunk, in output order. */
+  chunkIdentities(): Array<number>
+  /** `BindingOutputAsset::get_identity` of every asset, in output order. */
+  assetIdentities(): Array<number>
+  getChunk(index: number): BindingOutputChunk | null
+  getAsset(index: number): BindingOutputAsset | null
+}
+
 export declare class BindingBundleEndEventData {
   output: string
   duration: number
@@ -2827,9 +2841,9 @@ export interface BindingPluginOptions {
   renderStartMeta?: BindingPluginHookMeta
   renderError?: (ctx: BindingPluginContext, error: BindingError[]) => void
   renderErrorMeta?: BindingPluginHookMeta
-  generateBundle?: (ctx: BindingPluginContext, bundle: BindingResult<BindingOutputs>, isWrite: boolean, opts: BindingNormalizedOptions) => MaybePromise<VoidNullable<JsChangedOutputs>>
+  generateBundle?: (ctx: BindingPluginContext, bundle: BindingResult<BindingBundle>, isWrite: boolean, opts: BindingNormalizedOptions) => MaybePromise<VoidNullable<JsChangedOutputs>>
   generateBundleMeta?: BindingPluginHookMeta
-  writeBundle?: (ctx: BindingPluginContext, bundle: BindingResult<BindingOutputs>, opts: BindingNormalizedOptions) => MaybePromise<VoidNullable<JsChangedOutputs>>
+  writeBundle?: (ctx: BindingPluginContext, bundle: BindingResult<BindingBundle>, opts: BindingNormalizedOptions) => MaybePromise<VoidNullable<JsChangedOutputs>>
   writeBundleMeta?: BindingPluginHookMeta
   closeBundle?: (ctx: BindingPluginContext, error?: BindingError[]) => MaybePromise<VoidNullable>
   closeBundleMeta?: BindingPluginHookMeta

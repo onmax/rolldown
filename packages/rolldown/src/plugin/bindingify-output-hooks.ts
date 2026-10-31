@@ -1,6 +1,6 @@
 import type {
+  BindingBundle,
   BindingHookFilter,
-  BindingOutputs,
   BindingPluginContext,
   BindingPluginOptions,
   BindingRenderedChunk,
@@ -212,7 +212,7 @@ export function bindingifyRenderError(
 function createOutputBundle(
   args: BindingifyPluginArgs,
   ctx: BindingPluginContext,
-  bundle: BindingResult<BindingOutputs>,
+  bundle: BindingResult<BindingBundle>,
 ) {
   const context = createPluginContext(args, ctx);
   const cache = args.pluginContextData.outputBundleCache;

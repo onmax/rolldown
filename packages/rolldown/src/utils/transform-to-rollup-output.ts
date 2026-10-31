@@ -1,4 +1,5 @@
 import type {
+  BindingBundle,
   BindingOutputAsset,
   BindingOutputChunk,
   BindingOutputs,
@@ -238,6 +239,14 @@ export interface OutputBundleCache {
   changed: ChangedOutputs;
   context: MinimalPluginContext | null;
   items: Map<number, OutputChunk | OutputAsset>;
+  /** The identities of the last call's chunks and assets, in Rust's order. */
+  chunkIdentities: number[];
+  assetIdentities: number[];
+  /**
+   * The last call's view. It holds every output's data, so while the identities above are compared
+   * none of them can be freed and reused for other data, or changed in place by a native hook.
+   */
+  view: BindingBundle | null;
   /** The object behind `bundle`, updated in place so `bundle` stays one object for the build. */
   target: OutputBundle | null;
   bundle: OutputBundle | null;
@@ -248,6 +257,9 @@ export function createOutputBundleCache(): OutputBundleCache {
     changed: { updated: new Set(), deleted: new Set() },
     context: null,
     items: new Map(),
+    chunkIdentities: [],
+    assetIdentities: [],
+    view: null,
     target: null,
     bundle: null,
   };
@@ -262,10 +274,29 @@ export function createOutputBundleCache(): OutputBundleCache {
  */
 export function transformToSharedOutputBundle(
   context: MinimalPluginContext,
-  output: BindingOutputs,
+  output: BindingBundle,
   cache: OutputBundleCache,
   codeCache?: Map<string, OutputCodeCacheEntry>,
 ): OutputBundle {
+  const chunkIdentities = output.chunkIdentities();
+  const assetIdentities = output.assetIdentities();
+  const previous = cache.view;
+  cache.view = output;
+  // Nothing changed since the last hook: no wrapper recorded a change, and Rust has the same data in
+  // the same order (a change made in Rust, an emitted or deleted file, gives other identities).
+  if (
+    cache.bundle &&
+    previous &&
+    cache.changed.updated.size === 0 &&
+    cache.changed.deleted.size === 0 &&
+    sameNumbers(chunkIdentities, cache.chunkIdentities) &&
+    sameNumbers(assetIdentities, cache.assetIdentities)
+  ) {
+    cache.context = context;
+    return cache.bundle;
+  }
+  cache.chunkIdentities = chunkIdentities;
+  cache.assetIdentities = assetIdentities;
   const changedByPlugin = new Map<string, OutputChunk | OutputAsset>();
   for (const fileName of cache.changed.updated) {
     const item = cache.target?.[fileName];
@@ -288,20 +319,24 @@ export function transformToSharedOutputBundle(
     }
     items.set(identity, item);
   };
-  for (const chunk of output.chunks) {
+  chunkIdentities.forEach((identity, i) => {
+    let chunk: BindingOutputChunk | undefined;
+    const get = () => (chunk ??= output.getChunk(i)!);
     wrap(
-      chunk.getCodeIdentity(),
-      () => chunk.getFileName(),
-      () => transformToMutableRollupOutputChunk(chunk, cache.changed, codeCache),
+      identity,
+      () => get().getFileName(),
+      () => transformToMutableRollupOutputChunk(get(), cache.changed, codeCache),
     );
-  }
-  for (const asset of output.assets) {
+  });
+  assetIdentities.forEach((identity, i) => {
+    let asset: BindingOutputAsset | undefined;
+    const get = () => (asset ??= output.getAsset(i)!);
     wrap(
-      asset.getIdentity(),
-      () => asset.getFileName(),
-      () => transformToMutableRollupOutputAsset(asset, cache.changed),
+      identity,
+      () => get().getFileName(),
+      () => transformToMutableRollupOutputAsset(get(), cache.changed),
     );
-  }
+  });
   cache.items = items;
   if (!cache.target) {
     cache.target = {};
@@ -322,6 +357,12 @@ export function transformToSharedOutputBundle(
     bundleKeys.set(item, item.fileName);
   }
   return cache.bundle!;
+}
+
+function sameNumbers(a: number[], b: number[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export function collectChangedBundle(

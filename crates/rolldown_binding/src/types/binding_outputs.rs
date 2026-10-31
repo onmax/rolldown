@@ -61,6 +61,58 @@ impl From<rolldown::BundleOutput> for BindingOutputs {
   }
 }
 
+/// The bundle a `generateBundle` or `writeBundle` hook gets, read on demand. A build with thousands
+/// of outputs and a dozen such hooks made a JS object per output per hook as `BindingOutputs`;
+/// with this, JS asks for the identities once per hook and only for the outputs it hasn't seen.
+#[napi]
+pub struct BindingBundle {
+  chunks: Vec<Arc<rolldown_common::OutputChunk>>,
+  assets: Vec<Arc<rolldown_common::OutputAsset>>,
+}
+
+#[napi]
+impl BindingBundle {
+  /// `BindingOutputChunk::get_code_identity` of every chunk, in output order.
+  #[napi]
+  pub fn chunk_identities(&self) -> Vec<i64> {
+    self.chunks.iter().map(|chunk| identity(Arc::as_ptr(chunk).addr())).collect()
+  }
+
+  /// `BindingOutputAsset::get_identity` of every asset, in output order.
+  #[napi]
+  pub fn asset_identities(&self) -> Vec<i64> {
+    self.assets.iter().map(|asset| identity(Arc::as_ptr(asset).addr())).collect()
+  }
+
+  #[napi]
+  pub fn get_chunk(&self, index: u32) -> Option<BindingOutputChunk> {
+    self.chunks.get(index as usize).map(|chunk| BindingOutputChunk::new(Arc::clone(chunk)))
+  }
+
+  #[napi]
+  pub fn get_asset(&self, index: u32) -> Option<BindingOutputAsset> {
+    self.assets.get(index as usize).map(|asset| BindingOutputAsset::new(Arc::clone(asset)))
+  }
+}
+
+fn identity(address: usize) -> i64 {
+  i64::try_from(address).unwrap_or(i64::MAX)
+}
+
+impl From<Vec<rolldown_common::Output>> for BindingBundle {
+  fn from(outputs: Vec<rolldown_common::Output>) -> Self {
+    let mut chunks = vec![];
+    let mut assets = vec![];
+    for output in outputs {
+      match output {
+        rolldown_common::Output::Chunk(chunk) => chunks.push(chunk),
+        rolldown_common::Output::Asset(asset) => assets.push(asset),
+      }
+    }
+    Self { chunks, assets }
+  }
+}
+
 #[napi_derive::napi(object, object_to_js = false)]
 pub struct JsChangedOutputs {
   pub deleted: HashSet<String, FxBuildHasher>,
