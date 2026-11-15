@@ -6,6 +6,7 @@ import type {
   BindingHookResolveIdOutput,
   BindingHookTransformOutput,
   BindingPluginOptions,
+  BindingTransformHookExtraArgs,
   BindingTransformPluginContext,
 } from '../binding.cjs';
 import { RolldownMagicString } from '../binding-magic-string';
@@ -197,51 +198,59 @@ function bindingifyResolveDynamicImportResult(
   return result;
 }
 
+/**
+ * The `meta` argument of the `transform` hook. A class rather than an object literal with
+ * `Object.defineProperties`, because the hook runs once per module per plugin: defining the lazy
+ * getters on every call cost more than the rest of the wrapper.
+ */
+class TransformHookMeta {
+  declare moduleType: string;
+  rawId: string;
+  attributes: Record<string, string>;
+  #code: string;
+  #magicString?: RolldownMagicString;
+  #ast?: Program;
+
+  constructor(bindingMeta: BindingTransformHookExtraArgs, id: string, code: string) {
+    Object.assign(this, bindingMeta);
+    this.rawId = bindingMeta.rawId ?? id;
+    this.attributes = bindingMeta.attributes ?? {};
+    this.#code = code;
+  }
+
+  get magicString(): RolldownMagicString {
+    return (this.#magicString ??= new RolldownMagicString(this.#code));
+  }
+
+  get ast(): Program {
+    if (this.#ast) {
+      return this.#ast;
+    }
+    let lang: 'js' | 'jsx' | 'tsx' | 'ts' = 'js';
+    switch (this.moduleType) {
+      case 'js':
+      case 'jsx':
+      case 'ts':
+      case 'tsx':
+        lang = this.moduleType;
+        break;
+      default:
+        break;
+    }
+    this.#ast = parseAst(this.#code, {
+      astType: this.moduleType.includes('ts') ? 'ts' : 'js',
+      lang,
+    });
+    return this.#ast;
+  }
+}
+
 export function bindingifyTransform(
   args: BindingifyPluginArgs,
 ): PluginHookWithBindingExt<BindingPluginOptions['transform'], BindingHookFilter | undefined> {
   return bindingifyHook(args.plugin.transform, ({ handler, options }) => ({
     plugin: (ctx, code, id, bindingMeta) => {
-      let magicStringInstance: RolldownMagicString, astInstance: Program;
-      const meta = {
-        ...bindingMeta,
-        rawId: bindingMeta.rawId ?? id,
-        attributes: bindingMeta.attributes ?? {},
-      };
-      Object.defineProperties(meta, {
-        magicString: {
-          get() {
-            if (magicStringInstance) {
-              return magicStringInstance;
-            }
-            magicStringInstance = new RolldownMagicString(code);
-            return magicStringInstance;
-          },
-        },
-        ast: {
-          get() {
-            if (astInstance) {
-              return astInstance;
-            }
-            let lang: 'js' | 'jsx' | 'tsx' | 'ts' = 'js';
-            switch (meta.moduleType) {
-              case 'js':
-              case 'jsx':
-              case 'ts':
-              case 'tsx':
-                lang = meta.moduleType;
-                break;
-              default:
-                break;
-            }
-            astInstance = parseAst(code, {
-              astType: meta.moduleType.includes('ts') ? 'ts' : 'js',
-              lang,
-            });
-            return astInstance;
-          },
-        },
-      });
+      const meta = new TransformHookMeta(bindingMeta, id, code);
       const transformCtx = new TransformPluginContextImpl(
         args.outputOptions,
         ctx.inner(),
